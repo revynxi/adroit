@@ -1,3 +1,10 @@
+const logger = require('pino')();
+logger.info("Starting bot...");
+
+setInterval(() => {
+  logger.info("Bot is still alive!");
+}, 60000);
+
 const { SlashCommandBuilder } = require('@discordjs/builders');
 const { Client, GatewayIntentBits } = require('discord.js');
 const { REST } = require('@discordjs/rest');
