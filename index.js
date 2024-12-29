@@ -10,6 +10,9 @@ const { Client, GatewayIntentBits } = require('discord.js');
 const { REST } = require('@discordjs/rest');
 const { Routes } = require('discord-api-types/v9');
 
+const express = require('express');
+const keepAlive = require('./keep_alive');
+
 const TOKEN = process.env.MUNIFICUS_TOKEN;
 const CLIENT_ID = process.env.MUNIFICUS_CLIENT;
 
@@ -32,10 +35,20 @@ const echoCommand = new SlashCommandBuilder()
             .setRequired(true)
     );
 
+const app = express();
+
+app.get('/', (req, res) => {
+    res.send("Hello. I am alive!");
+});
+
+app.listen(process.env.PORT || 3000, () => {
+    console.log('Server is running...');
+});
+
 client.once('ready', async () => {
     try {
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [helloCommand.toJSON(), echoCommand.toJSON()] });
-        console.log('Slah commands are successfuly registered!');
+        console.log('Slash commands are successfuly registered!');
     } catch (error) {
         console.error('Failure while registering slash commands:');
         console.error(error);
@@ -50,5 +63,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply(text);
     }
 });
+
+keepAlive(app);
 
 client.login(TOKEN);
