@@ -1,0 +1,12 @@
+{
+  "name": "munificus",
+  "version": "1.0.0",
+  "description": "Multipurpose bot which was specifically designed for Kosmopolitikord",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.0.3"
+  }
+}
