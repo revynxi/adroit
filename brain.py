@@ -31,7 +31,7 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
 
 @bot.tree.command(name="awake", description="Hey, Adroit, are you awake?")
-async def hello(interaction: discord.Interaction):
+async def awake(interaction: discord.Interaction):
     await interaction.response.send_message(f"Awake. Never Sleep.")
     
 
