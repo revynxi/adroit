@@ -216,26 +216,36 @@ async def on_message(message):
 
     if violations:
         try:
-            max_severity = max(PUNISHMENTS[violation]["severity"] for violation in violations)
-            punishment = next(
-                (PUNISHMENTS[v] for v in violations if PUNISHMENTS[v]["severity"] == max_severity),
-                None
-            )
+            punishment_copy = punishment.copy()
+            severity = punishment_copy.pop("severity", None) 
 
-            if punishment:
-                await message.delete()
-                await enforce_punishment(message.author, **punishment)
-                await log_action(
+            await message.delete()
+            
+            await asyncio.gather(
+                enforce_punishment(message.author, **punishment_copy),
+                log_action(
                     guild=message.guild,
                     violations=violations,
                     message_content=message.content,
                     punishment=punishment,
                     author=message.author
                 )
+            )
 
         except Exception as e:
+            error_punishment = {
+                "action": "error",
+                "duration": None,
+                "severity": 0
+            }    
             error_msg = f"❌ Error processing message from {message.author}: {str(e)}"
-            await log_action(message.guild, {"error"}, error_msg, {"action": "error"}, message.author)
+            await log_action(
+                message.guild, 
+                {"system_error"},
+                error_msg,
+                error_punishment,
+                message.author
+            )
 
 @bot.event
 async def on_message_delete(message):
