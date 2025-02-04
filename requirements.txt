@@ -1,2 +1,6 @@
 discord.py
 flask
+openai
+python-dotenv
+langdetect
+aiohttp
