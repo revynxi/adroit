@@ -134,18 +134,6 @@ async def on_message(message):
     if user_message_count[user_id] > 5: 
         violations.append("spam")
 
-    if message.channel.id in RESTRICTED_CHANNELS:
-        content_lower = message.content.lower()
-        banned_keywords = RESTRICTED_CHANNELS[message.channel.id]
-        if any(keyword in content_lower for keyword in banned_keywords):
-            await message.delete()
-            try:
-                await message.author.send(f"{message.author.mention}  mentioning religion or politics is not allowed.")
-            except discord.errors.Forbidden:
-                print(f"Could not send DM to {message.author.name}.")
-            await enforce_punishment(message.author, action="mute", duration=timedelta(hours=1))
-            return
-
     openai_categories = await check_openai_moderation(message.content)
     if openai_categories.get("sexual") or openai_categories.get("nsfw"):
         violations.append("nsfw")
