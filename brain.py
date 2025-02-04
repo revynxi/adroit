@@ -10,7 +10,6 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from langdetect import detect
 
-
 app = Flask(__name__)
 
 @app.route('/')
@@ -26,20 +25,23 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=">>", intents=intents)
 
-ALLOWED_LANGUAGES = ["en"]
 CHANNEL_LANGUAGES = {
-    1243854715872084019: ["ru"],
-    1243854715872084019: ["en"],
-    
+    1243854715872084019: ["ru", "en"], 
     1321499824926888049: ["fr"],
     1122525009102000269: ["de"],
     1122523546355245126: ["ru"],
-    1122524817904635904: ["cn"],
-    1242768362237595749: ["es"]
+    1122524817904635904: ["zh-cn", "zh-tw"],  
+    1242768362237595749: ["es"],
+    1113377809440722974: ["en"],
+    1322517478365990984: ["en"],
+    1322517478365990984: ["en"],
+    1113377810476716132: ["en"],
 }
+
 DESIGNATED_TOPICS_CHANNELS = {
     1322517478365990984: ["politics"]
 }
+
 RESTRICTED_TOPICS = ["religion", "politics"]
 
 PUNISHMENTS = {
@@ -53,9 +55,7 @@ PUNISHMENTS = {
     "foreign_language": {"action": "mute", "duration": timedelta(minutes=5), "severity": 1}
 }
 
-
 user_message_count = {}
-
 
 async def check_openai_moderation(text):
     url = "https://api.openai.com/v1/moderations"
@@ -72,20 +72,17 @@ async def enforce_punishment(member, action, duration=None, severity=None):
         if action == "mute":
             muted_role = discord.utils.get(member.guild.roles, name="『Arrested』")
             if not muted_role:
-                muted_role = await member.guild.create_role(name="Muted")
+                muted_role = await member.guild.create_role(name="『Arrested』")
                 for channel in member.guild.channels:
-                    await channel.set_permissions(muted_role, send_messages=False)
+                    await channel.set_permissions(muted_role, 
+                                                send_messages=False,
+                                                add_reactions=False)
             await member.add_roles(muted_role)
             if duration:
                 await asyncio.sleep(duration.total_seconds())
                 await member.remove_roles(muted_role)
-        elif action == "kick":
-            await member.kick()
-        elif action == "ban":
-            await member.ban()
     except Exception as e:
-        print(f"Failed to enforce punishment: {e}") 
-
+        print(f"Failed to enforce punishment: {e}")
 
 @bot.event
 async def on_ready():
@@ -101,7 +98,6 @@ async def on_ready():
 async def awake(interaction: discord.Interaction):
     await interaction.response.send_message(f"Awake. Never Sleep.")
 
-
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -111,8 +107,9 @@ async def on_message(message):
     punishment_to_apply = None
 
     channel_id = message.channel.id
-    allowed_languages = CHANNEL_LANGUAGES.get(channel_id, ["en"])
-    if allowed_languages != "any":
+    allowed_languages = CHANNEL_LANGUAGES.get(channel_id, ["en"]) 
+    
+    if allowed_languages != ["en"]:  
         try:
             lang = detect(message.content)
             if lang not in allowed_languages:
@@ -120,6 +117,7 @@ async def on_message(message):
         except:
             pass
 
+    # Topic check
     content_lower = message.content.lower()
     if channel_id not in DESIGNATED_TOPICS_CHANNELS:
         if any(topic in content_lower for topic in RESTRICTED_TOPICS):
@@ -128,7 +126,7 @@ async def on_message(message):
         allowed_topics = DESIGNATED_TOPICS_CHANNELS[channel_id]
         if not any(topic in content_lower for topic in allowed_topics):
             violations.append("off_topic")
-    
+
     user_id = message.author.id
     user_message_count[user_id] = user_message_count.get(user_id, 0) + 1
     if user_message_count[user_id] > 5: 
@@ -158,12 +156,9 @@ async def on_message(message):
         if log_channel:
             await log_channel.send(
                 f"{message.author.mention} violated rules: {', '.join(violations)}. "
-                f"Action taken: {punishment_to_apply['action']}."
+                f"Action taken: {punishment_to_apply['action']} for {punishment_to_apply['duration']}."
             )
 
-    await bot.process_commands(message)
-
-    
 @bot.event
 async def on_message_delete(message):
     await asyncio.sleep(10)
@@ -172,6 +167,5 @@ async def on_message_delete(message):
         del user_message_count[user_id]
 
 Thread(target=run_flask).start()
-
 
 bot.run(os.getenv("ADROIT_TOKEN"))
