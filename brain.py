@@ -184,7 +184,7 @@ async def check_active_mutes():
     
     for user_id, unmute_time in ACTIVE_MUTES.items():
         if current_time >= unmute_time:
-            guild = bot.get_guild(YOUR_SERVER_ID)
+            guild = bot.get_guild(1113377331009048659)
             member = guild.get_member(user_id)
             if member:
                 muted_role = discord.utils.get(guild.roles, name="『Arrested』")
