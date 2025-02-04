@@ -6,6 +6,7 @@ import aiohttp
 import os
 import re
 import discord
+import json
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -23,6 +24,19 @@ def run_flask():
     app.run(host='0.0.0.0', port=8080)
 
 load_dotenv()
+
+ACTIVE_MUTES = {}
+
+def save_mutes():
+    with open("mutes.json", "w") as f:
+        json.dump({str(k): v.isoformat() for k, v in ACTIVE_MUTES.items()}, f)
+
+def load_mutes():
+    try:
+        with open("mutes.json", "r") as f:
+            return {int(k): datetime.fromisoformat(v) for k, v in json.load(f).items()}
+    except FileNotFoundError:
+        return {}
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -103,8 +117,9 @@ async def enforce_punishment(member, action, duration=None):
                         )
             await member.add_roles(muted_role, reason="Automatic moderation action")
             if duration:
-                await asyncio.sleep(duration.total_seconds())
-                await member.remove_roles(muted_role, reason="Mute duration expired")
+                unmute_time = datetime.utcnow() + duration
+                ACTIVE_MUTES[member.id] = unmute_time
+                save_mutes()
                 
         elif action == "ban":
             await member.ban(reason="Severe ToS violation", delete_message_days=1)
@@ -145,11 +160,42 @@ async def log_action(guild, violations, message_content, punishment, author):
 async def on_ready():
     print(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
     print("------")
+    
+    global ACTIVE_MUTES
+    ACTIVE_MUTES = load_mutes()
+    
+    bot.loop.create_task(check_mutes_loop())
+    
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s).")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
+
+async def check_mutes_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        await check_active_mutes()
+        await asyncio.sleep(60)
+
+async def check_active_mutes():
+    current_time = datetime.utcnow()
+    to_remove = []
+    
+    for user_id, unmute_time in ACTIVE_MUTES.items():
+        if current_time >= unmute_time:
+            guild = bot.get_guild(YOUR_SERVER_ID)
+            member = guild.get_member(user_id)
+            if member:
+                muted_role = discord.utils.get(guild.roles, name="『Arrested』")
+                if muted_role and muted_role in member.roles:
+                    await member.remove_roles(muted_role)
+                    print(f"Unmuted {member.display_name}")
+            to_remove.append(user_id)
+    
+    for user_id in to_remove:
+        del ACTIVE_MUTES[user_id]
+    save_mutes()
 
 @bot.tree.command(name="awake", description="Hey, Adroit, are you awake?")
 async def awake(interaction: discord.Interaction):
@@ -161,7 +207,7 @@ async def on_message(message):
         return
         
     violations = set()
-    punishment_to_apply = None
+    punishment = None
     current_time = datetime.utcnow()
 
     channel_id = message.channel.id
@@ -211,11 +257,12 @@ async def on_message(message):
             violations.add("discrimination")
         if categories.get("violence"):
             violations.add("tos_violation")
+            
+    
 
-    await bot.process_commands(message)
-
-    if violations:
-        try:
+    try:
+        await bot.process_commands(message)
+        if violations:
             max_severity = max(PUNISHMENTS[violation]["severity"] for violation in violations)
             punishment = next(
                 (PUNISHMENTS[v] for v in violations if PUNISHMENTS[v]["severity"] == max_severity),
@@ -223,34 +270,38 @@ async def on_message(message):
             )
 
             if punishment:
-                punishment_copy = punishment.copy()
-                severity = punishment_copy.pop("severity", None)
-
-                await message.delete()
-                await asyncio.gather(
-                    enforce_punishment(message.author, **punishment_copy),
-                    log_action(
-                        guild=message.guild,
-                        violations=violations,
-                        message_content=message.content,
-                        punishment=punishment,
-                        author=message.author
-                    )
+                try:
+                    await message.delete()
+                except discord.NotFound:
+                    pass
+                
+            punishment_copy = punishment.copy()
+            severity = punishment_copy.pop("severity", None)
+                
+            await asyncio.gather(
+                enforce_punishment(message.author, **punishment_copy),
+                log_action(
+                    guild=message.guild,
+                    violations=violations,
+                    message_content=message.content,
+                    punishment=punishment,
+                    author=message.author
                 )
-        except Exception as e:
-            error_punishment = {
-                "action": "error",
-                "duration": None,
-                "severity": 0
-            }    
-            error_msg = f"❌ Error processing message from {message.author}: {str(e)}"
-            await log_action(
-                message.guild, 
-                {"system_error"},
-                error_msg,
-                error_punishment if not punishment else punishment,
-                message.author
-            )
+             )
+    except Exception as e:
+        error_punishment = {
+            "action": "error",
+            "duration": None,
+            "severity": 0
+        }    
+        error_msg = f"❌ Error processing message from {message.author}: {str(e)}"
+        await log_action(
+            message.guild, 
+            {"system_error"},
+            error_msg,
+            error_punishment if not punishment else punishment,
+            message.author
+        )
 
 @bot.event
 async def on_message_delete(message):
