@@ -27,17 +27,21 @@ intents.message_content = True
 bot = commands.Bot(command_prefix=">>", intents=intents)
 
 ALLOWED_LANGUAGES = ["en"]
-DESIGNATED_TOPICS = {
-    1322517478365990984: ["politics"]
-}
-RESTRICTED_TOPICS = ["religion", "politics"]
-FOREIGN_CHANNELS = {
+CHANNEL_LANGUAGES = {
+    1243854715872084019: ["ru"],
+    1243854715872084019: ["en"],
+    
     1321499824926888049: ["fr"],
     1122525009102000269: ["de"],
     1122523546355245126: ["ru"],
     1122524817904635904: ["cn"],
     1242768362237595749: ["es"]
 }
+DESIGNATED_TOPICS = {
+    1322517478365990984: ["politics"]
+}
+RESTRICTED_TOPICS = ["religion", "politics"]
+
 PUNISHMENTS = {
     "discrimination": {"action": "mute", "duration": timedelta(minutes=15), "severity": 5},
     "spam": {"action": "mute", "duration": timedelta(minutes=20), "severity": 3},
@@ -128,9 +132,7 @@ async def on_message(message):
     user_id = message.author.id
     user_message_count[user_id] = user_message_count.get(user_id, 0) + 1
     if user_message_count[user_id] > 5: 
-        await message.delete()
-        await enforce_punishment(message.author, **PUNISHMENTS["spam"])
-        return
+        violations.append("spam")
 
     if message.channel.id in RESTRICTED_CHANNELS:
         content_lower = message.content.lower()
