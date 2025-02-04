@@ -67,7 +67,7 @@ async def check_openai_moderation(text):
             result = await response.json()
             return result.get("results", [{}])[0].get("categories", {}) 
 
-async def enforce_punishment(member, action, duration=None):
+async def enforce_punishment(member, action, duration=None, severity=None):
     try:
         if action == "mute":
             muted_role = discord.utils.get(member.guild.roles, name="『Arrested』")
