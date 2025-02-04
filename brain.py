@@ -4,11 +4,14 @@ from datetime import datetime, timedelta
 import asyncio
 import aiohttp
 import os
+import re
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-from langdetect import detect
+from langdetect import detect, DetectorFactory
+
+DetectorFactory.seed = 0
 
 app = Flask(__name__)
 
