@@ -39,6 +39,7 @@ def load_mutes():
         return {}
 
 intents = discord.Intents.default()
+intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix=">>", intents=intents)
 
@@ -49,10 +50,6 @@ CHANNEL_LANGUAGES = {
     1122523546355245126: ["ru"],
     1122524817904635904: ["zh-cn", "zh-tw"],  
     1242768362237595749: ["es"],
-    1113377809440722974: ["en"],
-    1322517478365990984: ["en"],
-    1322517478365990984: ["en"],
-    1113377810476716132: ["en"],
 }
 
 DESIGNATED_TOPICS_CHANNELS = {
@@ -68,14 +65,14 @@ RESTRICTED_PATTERNS = {
 }
 
 PUNISHMENTS = {
-    "discrimination": {"action": "mute", "duration": timedelta(minutes=15), "severity": 5},
-    "spam": {"action": "mute", "duration": timedelta(minutes=20), "severity": 3},
-    "nsfw": {"action": "mute", "duration": timedelta(minutes=45), "severity": 7},
-    "tos_violation": {"action": "mute", "duration": timedelta(hours=1), "severity": 8},
-    "off_topic": {"action": "mute", "duration": timedelta(minutes=10), "severity": 2},
-    "restricted_topic": {"action": "mute", "duration": timedelta(minutes=15), "severity": 4},
-    "advertising": {"action": "mute", "duration": timedelta(minutes=30), "severity": 6},
-    "foreign_language": {"action": "mute", "duration": timedelta(minutes=5), "severity": 1}
+    "discrimination": {"action": "mute", "duration": timedelta(minutes=15), "severity": 5, "aka": 'Discrimination'},
+    "spam": {"action": "mute", "duration": timedelta(minutes=20), "severity": 3, "aka": 'Spam'},
+    "nsfw": {"action": "mute", "duration": timedelta(minutes=45), "severity": 7, "aka": 'NSFW'},
+    "tos_violation": {"action": "mute", "duration": timedelta(hours=1), "severity": 8, "aka": 'ToS Violation'},
+    "off_topic": {"action": "mute", "duration": timedelta(minutes=10), "severity": 2, "aka": 'Off-topic'},
+    "restricted_topic": {"action": "mute", "duration": timedelta(minutes=15), "severity": 4, "aka": 'Restricted topic'},
+    "advertising": {"action": "mute", "duration": timedelta(minutes=30), "severity": 6, "aka": 'Advertising'},
+    "foreign_language": {"action": "mute", "duration": timedelta(minutes=5), "severity": 1, "aka": 'Foreign language'}
 }
 
 DISCRIMINATION_PATTERNS = [
@@ -117,8 +114,10 @@ async def enforce_punishment(member, action, duration=None):
                         )
             await member.add_roles(muted_role, reason="Automatic moderation action")
             if duration:
-                unmute_time = datetime.utcnow() + duration
-                ACTIVE_MUTES[member.id] = unmute_time
+                guild_mutes = ACTIVE_MUTES.get(member.guild.id, {})
+                unmute_time = datetime.utcnow() + punishment["duration"]
+                guild_mutes[member.id] = unmute_time
+                ACTIVE_MUTES[member.guild.id] = guild_mutes
                 save_mutes()
                 
         elif action == "ban":
@@ -141,10 +140,12 @@ async def log_action(guild, violations, message_content, punishment, author):
             color=discord.Color.red() if punishment['severity'] >= 5 else discord.Color.orange(),
             timestamp=datetime.utcnow()
         )
+
+        aka_violations = [PUNISHMENTS[violation]["aka"] for violation in violations]
         
         embed.add_field(
             name="Detected Violations",
-            value=", ".join(violations),
+            value=", ".join(aka_violations),
             inline=False
         )
         embed.add_field(
@@ -180,21 +181,25 @@ async def check_mutes_loop():
 
 async def check_active_mutes():
     current_time = datetime.utcnow()
-    to_remove = []
     
-    for user_id, unmute_time in ACTIVE_MUTES.items():
-        if current_time >= unmute_time:
-            guild = bot.get_guild(1113377331009048659)
-            member = guild.get_member(user_id)
-            if member:
-                muted_role = discord.utils.get(guild.roles, name="『Arrested』")
-                if muted_role and muted_role in member.roles:
-                    await member.remove_roles(muted_role)
-                    print(f"Unmuted {member.display_name}")
-            to_remove.append(user_id)
-    
-    for user_id in to_remove:
-        del ACTIVE_MUTES[user_id]
+    for guild in bot.guilds:
+        guild_mutes = ACTIVE_MUTES.get(guild.id, {})
+        to_remove = []
+        
+        for user_id, unmute_time in guild_mutes.items():
+            if current_time >= unmute_time:
+                member = guild.get_member(user_id)
+                if member:
+                    muted_role = discord.utils.get(guild.roles, name="『Arrested』")
+                    if muted_role and muted_role in member.roles:
+                        await member.remove_roles(muted_role)
+                        print(f"Unmuted {member.display_name} in {guild.name}")
+                to_remove.append(user_id)
+                
+        for user_id in to_remove:
+            del guild_mutes[user_id]
+        ACTIVE_MUTES[guild.id] = guild_mutes
+        
     save_mutes()
 
 @bot.tree.command(name="awake", description="Hey, Adroit, are you awake?")
@@ -213,13 +218,13 @@ async def on_message(message):
     channel_id = message.channel.id
     allowed_languages = CHANNEL_LANGUAGES.get(channel_id, ["en"]) 
     
-    if allowed_languages != ["en"]:
-        try:
-            lang = detect(message.content)
-            if lang not in allowed_languages:
-                violations.add("foreign_language")
-        except:
-            pass
+    if allowed_languages != ["any"]:
+    try:
+        lang = detect(message.content)
+        if lang not in allowed_languages:
+            violations.add("foreign_language")
+    except:
+        pass
 
     content_lower = message.content.lower()
     if channel_id not in DESIGNATED_TOPICS_CHANNELS:
