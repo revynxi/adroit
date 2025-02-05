@@ -29,23 +29,27 @@ ACTIVE_MUTES = {}
 
 def save_mutes():
     with open("mutes.json", "w") as f:
-        json.dump({str(k): v.isoformat() for k, v in ACTIVE_MUTES.items()}, f)
+        serialized = {
+            str(guild_id): {
+                str(user_id): unmute_time.isoformat()
+                for user_id, unmute_time in guild_mutes.items()
+            }
+            for guild_id, guild_mutes in ACTIVE_MUTES.items()
+        }
+        json.dump(serialized, f)
 
 def load_mutes():
     try:
         with open("mutes.json", "r") as f:
-            data = f.read().strip()  
-            if not data:
-                return {}
-            return {int(k): datetime.fromisoformat(v) for k, v in json.loads(data).items()}
-    except json.JSONDecodeError:
-        print("Error: The mutes.json file is not properly formatted.")
-        return {}  
+            data = json.load(f)
+            return {
+                int(guild_id): {
+                    int(user_id): datetime.fromisoformat(unmute_time)
+                    for user_id, unmute_time in guild_mutes.items()
+                }
+                for guild_id, guild_mutes in data.items()
+            }
     except FileNotFoundError:
-        print("Error: The mutes.json file does not exist.")
-        return {}
-    except Exception as e:
-        print(f"Unexpected error: {e}")
         return {}
 
 intents = discord.Intents.default()
