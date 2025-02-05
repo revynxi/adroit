@@ -219,12 +219,12 @@ async def on_message(message):
     allowed_languages = CHANNEL_LANGUAGES.get(channel_id, ["en"]) 
     
     if allowed_languages != ["any"]:
-    try:
-        lang = detect(message.content)
-        if lang not in allowed_languages:
-            violations.add("foreign_language")
-    except:
-        pass
+        try:
+            lang = detect(message.content)
+            if lang not in allowed_languages:
+                violations.add("foreign_language")
+        except:
+            pass
 
     content_lower = message.content.lower()
     if channel_id not in DESIGNATED_TOPICS_CHANNELS:
