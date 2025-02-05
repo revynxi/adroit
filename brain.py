@@ -128,10 +128,10 @@ async def enforce_punishment(member, action, duration=None):
                         )
             await member.add_roles(muted_role, reason="Automatic moderation action")
             if duration:
-                guild_mutes = ACTIVE_MUTES.get(member.guild.id, {})
                 unmute_time = datetime.utcnow() + punishment["duration"]
-                guild_mutes[member.id] = unmute_time
-                ACTIVE_MUTES[member.guild.id] = guild_mutes
+                if member.guild.id not in ACTIVE_MUTES:
+                    ACTIVE_MUTES[member.guild.id] = {}
+                ACTIVE_MUTES[member.guild.id][member.id] = unmute_time
                 save_mutes()
                 
         elif action == "ban":
