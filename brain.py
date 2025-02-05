@@ -33,9 +33,15 @@ def save_mutes():
 
 def load_mutes():
     try:
-        with open("mutes.json", "r") as f:
-            return {int(k): datetime.fromisoformat(v) for k, v in json.load(f).items()}
+        data = f.read().strip()
+        if not data:  
+            return {}
+        return {int(k): datetime.fromisoformat(v) for k, v in json.loads(data).items()}
+    except json.JSONDecodeError:
+        print("Error: The mutes.json file is not properly formatted.")
+        return {}  
     except FileNotFoundError:
+        print("Error: The mutes.json file does not exist.")
         return {}
 
 intents = discord.Intents.default()
