@@ -7,12 +7,26 @@ import os
 import re
 import discord
 import json
+import torch
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 from langdetect import detect, DetectorFactory
+from transformers import pipeline
 
 DetectorFactory.seed = 0
+LANGUAGE_PIPELINE = None
+
+async def load_model():
+    global LANGUAGE_PIPELINE
+    device = 0 if torch.cuda.is_available() else -1
+    LANGUAGE_PIPELINE = pipeline(
+        "text-classification",
+        model="papluca/xlm-roberta-base-language-detection",
+        device=device,
+        batch_size=4 
+    )
+    print("AI Language detector ready")
 
 app = Flask(__name__)
 
@@ -57,6 +71,10 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix=">>", intents=intents)
 
+@bot.event
+async def setup_hook():
+    await load_model()
+
 CHANNEL_LANGUAGES = {
     1243854715872084019: ["ru", "en"], 
     1321499824926888049: ["fr"],
@@ -73,7 +91,6 @@ DESIGNATED_TOPICS_CHANNELS = {
 RESTRICTED_TOPICS = ["religion", "politics"]
 
 RESTRICTED_PATTERNS = {
-    # "religion": re.compile(r"\b(god|jesus|allah|buddha|hindu|church|mosque|temple|pray)\b", re.I),
     "politics": re.compile(r"\b(protest|riot)\b", re.I),
     "conflict": re.compile(r"\b(terrorism)\b", re.I)
 }
@@ -96,6 +113,20 @@ DISCRIMINATION_PATTERNS = [
 
 user_message_count = {}
 last_message_times = {}
+
+async def detect_language_ai(text):
+    clean_text = re.sub(r'<@!?\d+>|https?://\S+', '', text)[:512]
+    try:
+        result = await asyncio.to_thread(
+            LANGUAGE_PIPELINE, 
+            clean_text, 
+            truncation=True,
+            max_length=2048
+        )
+        return result[0]['label'].lower() if result[0]['score'] > 0.95 else None
+    except Exception as e:
+        print(f"AI Detection failed: {e}")
+        return None
 
 async def check_openai_moderation(text):
     url = "https://api.openai.com/v1/moderations"
@@ -128,7 +159,7 @@ async def enforce_punishment(member, action, duration=None):
                         )
             await member.add_roles(muted_role, reason="Automatic moderation action")
             if duration:
-                unmute_time = datetime.utcnow() + punishment["duration"]
+                unmute_time = datetime.utcnow() + duration
                 if member.guild.id not in ACTIVE_MUTES:
                     ACTIVE_MUTES[member.guild.id] = {}
                 ACTIVE_MUTES[member.guild.id][member.id] = unmute_time
@@ -146,16 +177,19 @@ async def enforce_punishment(member, action, duration=None):
 async def log_action(guild, violations, message_content, punishment, author):
     log_channel = discord.utils.get(guild.channels, name="『📄』staff-logs")
     if log_channel:
+        aka_violations = [
+            PUNISHMENTS.get(violation, {}).get("aka", violation.title())
+            for violation in violations
+        ]
+        
         embed = discord.Embed(
             title="🚨 Moderation Action",
             description=f"**User:** {author.mention}\n"
                        f"**Action Taken:** {punishment['action'].title()}\n"
-                       f"**Duration:** {punishment['duration'] if punishment['duration'] else 'Permanent'}",
-            color=discord.Color.red() if punishment['severity'] >= 5 else discord.Color.orange(),
+                       f"**Duration:** {str(punishment['duration']) if punishment.get('duration') else 'Permanent'}",
+            color=discord.Color.red() if punishment.get('severity', 0) >=5 else discord.Color.orange(),
             timestamp=datetime.utcnow()
         )
-
-        aka_violations = [PUNISHMENTS[violation]["aka"] for violation in violations]
         
         embed.add_field(
             name="Detected Violations",
@@ -164,7 +198,7 @@ async def log_action(guild, violations, message_content, punishment, author):
         )
         embed.add_field(
             name="Message Content",
-            value=f"```{message_content[:1000]}```",  
+            value=f"```{message_content[:1000]}```",
             inline=False
         )
         
@@ -232,13 +266,10 @@ async def on_message(message):
     channel_id = message.channel.id
     allowed_languages = CHANNEL_LANGUAGES.get(channel_id, ["en"]) 
     
-    if allowed_languages != ["any"]:
-        try:
-            lang = detect(message.content)
-            if lang not in allowed_languages:
-                violations.add("foreign_language")
-        except:
-            pass
+    if allowed_languages != ["any"]:  
+        lang = await detect_language_ai(message.content)
+        if lang and lang not in allowed_languages:
+            violations.add("foreign_language")
 
     content_lower = message.content.lower()
     if channel_id not in DESIGNATED_TOPICS_CHANNELS:
@@ -254,13 +285,14 @@ async def on_message(message):
     user_id = message.author.id
     now = datetime.utcnow()
     if user_id in last_message_times:
-        if (now - last_message_times[user_id]).total_seconds() > 10:
+        time_diff = (now - last_message_times[user_id]).total_seconds()
+        if time_diff > 10:
             user_message_count[user_id] = 0
 
     user_message_count[user_id] = user_message_count.get(user_id, 0) + 1
     last_message_times[user_id] = now
-    if user_message_count[user_id] > 5: 
-        violations.append("spam")
+    if user_message_count[user_id] > 5:
+        violations.add("spam")
 
     for pattern in DISCRIMINATION_PATTERNS:
         if pattern.search(message.content):
@@ -276,8 +308,6 @@ async def on_message(message):
             violations.add("discrimination")
         if categories.get("violence"):
             violations.add("tos_violation")
-            
-    
 
     try:
         await bot.process_commands(message)
@@ -294,19 +324,18 @@ async def on_message(message):
                 except discord.NotFound:
                     pass
                 
-            punishment_copy = punishment.copy()
-            severity = punishment_copy.pop("severity", None)
+                duration = punishment.get('duration')
                 
-            await asyncio.gather(
-                enforce_punishment(message.author, **punishment_copy),
-                log_action(
-                    guild=message.guild,
-                    violations=violations,
-                    message_content=message.content,
-                    punishment=punishment,
-                    author=message.author
+                await asyncio.gather(
+                    enforce_punishment(message.author, **punishment),
+                    log_action(
+                        guild=message.guild,
+                        violations=violations,
+                        message_content=message.content,
+                        punishment=punishment,
+                        author=message.author
+                    )
                 )
-             )
     except Exception as e:
         error_punishment = {
             "action": "error",
@@ -318,7 +347,7 @@ async def on_message(message):
             message.guild, 
             {"system_error"},
             error_msg,
-            error_punishment if not punishment else punishment,
+            error_punishment,
             message.author
         )
 
