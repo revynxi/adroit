@@ -6,3 +6,4 @@ langdetect
 aiohttp
 torch
 transformers
+waitress
