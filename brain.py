@@ -13,6 +13,8 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from langdetect import detect, DetectorFactory
 from transformers import pipeline
+from waitress import serve
+import sqlite3
 
 DetectorFactory.seed = 0
 LANGUAGE_PIPELINE = None
@@ -36,36 +38,40 @@ def home():
     return "Bot is now awake"
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8080)
+    serve(app, host='0.0.0.0', port=8080)
 
 load_dotenv()
 
 ACTIVE_MUTES = {}
 
 def save_mutes():
-    with open("mutes.json", "w") as f:
-        serialized = {
-            str(guild_id): {
-                str(user_id): unmute_time.isoformat()
-                for user_id, unmute_time in guild_mutes.items()
-            }
-            for guild_id, guild_mutes in ACTIVE_MUTES.items()
-        }
-        json.dump(serialized, f)
+    conn = sqlite3.connect('mutes.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS mutes
+                 (guild_id INTEGER, user_id INTEGER, unmute_time TEXT)''')
+    c.execute('DELETE FROM mutes')
+    for guild_id, guild_mutes in ACTIVE_MUTES.items():
+        for user_id, unmute_time in guild_mutes.items():
+            c.execute('INSERT INTO mutes VALUES (?, ?, ?)',
+                      (guild_id, user_id, unmute_time.isoformat()))
+    conn.commit()
+    conn.close()
 
 def load_mutes():
-    try:
-        with open("mutes.json", "r") as f:
-            data = json.load(f)
-            return {
-                int(guild_id): {
-                    int(user_id): datetime.fromisoformat(unmute_time)
-                    for user_id, unmute_time in guild_mutes.items()
-                }
-                for guild_id, guild_mutes in data.items()
-            }
-    except FileNotFoundError:
-        return {}
+    ACTIVE_MUTES = {}
+    conn = sqlite3.connect('mutes.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS mutes
+                 (guild_id INTEGER, user_id INTEGER, unmute_time TEXT)''')
+    c.execute('SELECT * FROM mutes')
+    rows = c.fetchall()
+    for row in rows:
+        guild_id, user_id, unmute_time = row
+        if guild_id not in ACTIVE_MUTES:
+            ACTIVE_MUTES[guild_id] = {}
+        ACTIVE_MUTES[guild_id][user_id] = datetime.fromisoformat(unmute_time)
+    conn.close()
+    return ACTIVE_MUTES
 
 intents = discord.Intents.default()
 intents.members = True
@@ -121,6 +127,10 @@ user_message_count = {}
 last_message_times = {}
 
 async def detect_language_ai(text):
+    global LANGUAGE_PIPELINE
+    if LANGUAGE_PIPELINE is None:
+        await load_model()
+    
     clean_text = re.sub(r'<@!?\d+>|https?://\S+', '', text)[:512]
     try:
         result = await asyncio.to_thread(
