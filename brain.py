@@ -259,11 +259,12 @@ async def awake(interaction: discord.Interaction):
 @bot.command()
 async def classify(ctx, *, text):
     try:
-        classifier = await load_model() 
-        result = await asyncio.to_thread(classifier, text)
+        if LANGUAGE_PIPELINE is None:
+            await load_model()
+        result = await asyncio.to_thread(LANGUAGE_PIPELINE, text)
         await ctx.send(f"Result: {result}")
     except Exception as e:
-        logger.error(f"Classification error: {e}")
+        print(f"Classification error: {e}")
         await ctx.send("Error processing request.")
 
 @bot.event
