@@ -264,7 +264,7 @@ async def on_message(message):
     current_time = datetime.utcnow()
 
     channel_id = message.channel.id
-    allowed_languages = CHANNEL_LANGUAGES.get(channel_id, ["en"]) 
+    allowed_languages = CHANNEL_LANGUAGES.get(channel_id, ["any"])
     
     if allowed_languages != ["any"]:  
         lang = await detect_language_ai(message.content)
