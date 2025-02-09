@@ -70,7 +70,7 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix=">>", intents=intents)
-
+    
 @bot.event
 async def setup_hook():
     await load_model()
@@ -253,6 +253,16 @@ async def check_active_mutes():
 @bot.tree.command(name="awake", description="Hey, Adroit, are you awake?")
 async def awake(interaction: discord.Interaction):
     await interaction.response.send_message(f"Awake. Never Sleep.")
+
+@bot.command()
+async def classify(ctx, *, text):
+    try:
+        classifier = await load_model() 
+        result = await asyncio.to_thread(classifier, text)
+        await ctx.send(f"Result: {result}")
+    except Exception as e:
+        logger.error(f"Classification error: {e}")
+        await ctx.send("Error processing request.")
 
 @bot.event
 async def on_message(message):
