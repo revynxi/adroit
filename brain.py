@@ -20,11 +20,12 @@ LANGUAGE_PIPELINE = None
 async def load_model():
     global LANGUAGE_PIPELINE
     device = 0 if torch.cuda.is_available() else -1
-    LANGUAGE_PIPELINE = pipeline(
+    LANGUAGE_PIPELINE = await asyncio.to_thread(
+        pipeline,
         "text-classification",
         model="papluca/xlm-roberta-base-language-detection",
         device=device,
-        batch_size=4 
+        batch_size=4
     )
     print("AI Language detector ready")
 
@@ -73,7 +74,10 @@ bot = commands.Bot(command_prefix=">>", intents=intents)
     
 @bot.event
 async def setup_hook():
-    await load_model()
+    try:
+        await load_model()
+    except Exception as e:
+        print(f"Error during setup_hook: {e}")
 
 CHANNEL_LANGUAGES = {
     1321499824926888049: ["fr"],
@@ -371,6 +375,7 @@ async def on_message_delete(message):
     if user_id in user_message_count:
         del user_message_count[user_id]
 
-Thread(target=run_flask).start()
+thread = Thread(target=run_flask, daemon=True)
+thread.start()
 
 bot.run(os.getenv("ADROIT_TOKEN"))
