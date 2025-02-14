@@ -105,21 +105,22 @@ CHANNEL_CONFIG = {
 }
 
 RESTRICTED_PATTERNS = {
-    "discrimination": re.compile(r"""
-        \b(nigg(a|er)|chink|spic|kike|fag|retard|tranny|
-        white\s+power|black\s+lives|all\s+lives\s+matter|
-        islamophobi(a|c)|anti[\s-]?semiti(sm|c)\b
-    """, re.I|re.X),
-    
-    "advertising": re.compile(r"""
-        (discord\.gg/|join\s+our|server\s+invite|
-        free\s+nitro|http(s)?://|www\.|\.com|\.net|\.org)
-    """, re.I|re.X),
-    
-    "nsfw": re.compile(r"""
-        \b(sex|porn|onlyfans|nsfw|dick|pussy|tits|anal|
-        masturbat(e|ion)|rape|pedo|underage)\b
-    """, re.I|re.X)
+    "discrimination": re.compile(
+        r"\b(nigg(a|er)|chink|spic|kike|fag|retard|tranny|"
+        r"white\s+power|black\s+lives|all\s+lives\s+matter|"
+        r"islamophobi(a|c)|anti[\s-]?semiti(sm|c)\b",
+        re.IGNORECASE | re.VERBOSE
+    ),
+    "advertising": re.compile(
+        r"(discord\.gg/|join\s+our|server\s+invite|"
+        r"free\s+nitro|http(s)?://|www\.|\.com|\.net|\.org)",
+        re.IGNORECASE | re.VERBOSE
+    ),
+    "nsfw": re.compile(
+        r"\b(sex|porn|onlyfans|nsfw|dick|pussy|tits|anal|"
+        r"masturbat(e|ion)|rape|pedo|underage)\b",
+        re.IGNORECASE | re.VERBOSE
+    )
 }
 
 PUNISHMENT_SYSTEM = {
