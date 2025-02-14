@@ -16,16 +16,26 @@ async def detect_language_ai(text):
     return lang  
     
 async def handle(request):
-    return web.Response(text="Bot is awake")
+    return web.Response(
+        text="Bot is awake",
+        status=200,
+        headers={"Content-Type": "text/plain"}
+    )
 
 async def start_http_server():
-    app = web.Application()
-    app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    print("HTTP server started")
+    try:
+        app = web.Application()
+        app.router.add_get('/', handle)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        
+        port = int(os.getenv("PORT", "8080"))
+        site = web.TCPSite(runner, host='0.0.0.0', port=port)
+        
+        await site.start()
+        print(f"✅ HTTP server running on port {port}")
+    except Exception as e:
+        print(f"❌ Failed to start HTTP server: {e}")
 
 load_dotenv()
 
@@ -217,6 +227,7 @@ async def on_ready():
     
     bot.loop.create_task(check_mutes_loop())
     bot.loop.create_task(cleanup_message_counts())
+    bot.loop.create_task(start_http_server())
     gc.collect()
     
     try:
