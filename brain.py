@@ -133,7 +133,7 @@ async def check_openai_moderation(text):
     headers = {"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}"}
     data = {"input": text}
 
-    async with aiohttp.ClientSession() as session:
+    async with ClientSession() as session: 
         async with session.post(url, headers=headers, json=data) as response:
             result = await response.json()
             return result.get("results", [{}])[0]
