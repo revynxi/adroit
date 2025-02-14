@@ -1,44 +1,32 @@
 from flask import Flask
 from threading import Thread
 from datetime import datetime, timedelta
+from aiohttp import web
 import asyncio
-import aiohttp
 import os
 import re
 import discord
 import json
-import torch
+import fasttext
+import sqlite3
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-from langdetect import detect, DetectorFactory
-from transformers import pipeline
 from waitress import serve
-import sqlite3
 
-DetectorFactory.seed = 0
-LANGUAGE_PIPELINE = None
-
-async def load_model():
-    global LANGUAGE_PIPELINE
-    device = 0 if torch.cuda.is_available() else -1
-    LANGUAGE_PIPELINE = await asyncio.to_thread(
-        pipeline,
-        "text-classification",
-        model="papluca/xlm-roberta-base-language-detection",
-        device=device,
-        batch_size=4
-    )
-    print("AI Language detector ready")
-
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is now awake"
+async def detect_language_ai(text):
+    clean_text = re.sub(r'<@!?\d+>|https?://\S+', '', text)[:512]
+    model = fasttext.load_model("lid.176.bin")
+    lang = model.predict(clean_text)[0][0].replace("__label__", "")
+    return lang  
+    
+async def handle(request):
+    return web.Response(text="Bot is awake")
 
 def run_flask():
-    serve(app, host='0.0.0.0', port=8080)
+    app = web.Application()
+    app.router.add_get('/', handle)
+    web.run_app(app, host='0.0.0.0', port=8080)
 
 load_dotenv()
 
@@ -53,7 +41,7 @@ def save_mutes():
     for guild_id, guild_mutes in ACTIVE_MUTES.items():
         for user_id, unmute_time in guild_mutes.items():
             c.execute('INSERT INTO mutes VALUES (?, ?, ?)',
-                      (guild_id, user_id, unmute_time.isoformat()))
+                     (guild_id, user_id, unmute_time.isoformat()))
     conn.commit()
     conn.close()
 
@@ -64,8 +52,7 @@ def load_mutes():
     c.execute('''CREATE TABLE IF NOT EXISTS mutes
                  (guild_id INTEGER, user_id INTEGER, unmute_time TEXT)''')
     c.execute('SELECT * FROM mutes')
-    rows = c.fetchall()
-    for row in rows:
+    for row in c.fetchall():
         guild_id, user_id, unmute_time = row
         if guild_id not in ACTIVE_MUTES:
             ACTIVE_MUTES[guild_id] = {}
@@ -89,7 +76,7 @@ CHANNEL_LANGUAGES = {
     1321499824926888049: ["fr"],
     1122525009102000269: ["de"],
     1122523546355245126: ["ru"],
-    1122524817904635904: ["zh-cn", "zh-tw"],  
+    1122524817904635904: ["zh"],  
     1242768362237595749: ["es"],
     1113377809440722974: ["en"],
     1322517478365990984: ["en"],
@@ -127,22 +114,10 @@ user_message_count = {}
 last_message_times = {}
 
 async def detect_language_ai(text):
-    global LANGUAGE_PIPELINE
-    if LANGUAGE_PIPELINE is None:
-        await load_model()
-    
     clean_text = re.sub(r'<@!?\d+>|https?://\S+', '', text)[:512]
-    try:
-        result = await asyncio.to_thread(
-            LANGUAGE_PIPELINE, 
-            clean_text, 
-            truncation=True,
-            max_length=2048
-        )
-        return result[0]['label'].lower() if result[0]['score'] > 0.95 else None
-    except Exception as e:
-        print(f"AI Detection failed: {e}")
-        return None
+    model = fasttext.load_model("lid.176.bin")
+    lang = model.predict(clean_text)[0][0].replace("__label__", "")
+    return lang
 
 async def check_openai_moderation(text):
     url = "https://api.openai.com/v1/moderations"
@@ -221,8 +196,20 @@ async def log_action(guild, violations, message_content, punishment, author):
         embed.set_footer(text=f"User ID: {author.id}")
         await log_channel.send(embed=embed)
 
+async def cleanup_message_counts():
+    while True:
+        await asyncio.sleep(3600)  
+        now = datetime.utcnow()
+        to_remove = [uid for uid, t in last_message_times.items() 
+                     if (now - t).total_seconds() > 86400] 
+        for uid in to_remove:
+            del user_message_count[uid]
+            del last_message_times[uid]
+
 @bot.event
 async def on_ready():
+    import gc
+
     print(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
     print("------")
     
@@ -230,6 +217,8 @@ async def on_ready():
     ACTIVE_MUTES = load_mutes()
     
     bot.loop.create_task(check_mutes_loop())
+    bot.loop.create_task(cleanup_message_counts())
+    gc.collect()
     
     try:
         synced = await bot.tree.sync()
