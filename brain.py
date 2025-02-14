@@ -1,18 +1,13 @@
-from flask import Flask
-from threading import Thread
 from datetime import datetime, timedelta
 from aiohttp import web
 import asyncio
 import os
 import re
 import discord
-import json
 import fasttext
 import sqlite3
-from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-from waitress import serve
 
 async def detect_language_ai(text):
     clean_text = re.sub(r'<@!?\d+>|https?://\S+', '', text)[:512]
@@ -23,10 +18,14 @@ async def detect_language_ai(text):
 async def handle(request):
     return web.Response(text="Bot is awake")
 
-def run_flask():
+async def start_http_server():
     app = web.Application()
     app.router.add_get('/', handle)
-    web.run_app(app, host='0.0.0.0', port=8080)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    print("HTTP server started")
 
 load_dotenv()
 
@@ -373,8 +372,5 @@ async def on_message_delete(message):
     user_id = message.author.id
     if user_id in user_message_count:
         del user_message_count[user_id]
-
-thread = Thread(target=run_flask, daemon=True)
-thread.start()
 
 bot.run(os.getenv("ADROIT_TOKEN"))
