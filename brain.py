@@ -46,10 +46,14 @@ load_dotenv()
 
 def init_db():
     with sqlite3.connect('infractions.db') as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS infractions
-                     (user_id INTEGER, guild_id INTEGER, points INTEGER, timestamp TEXT)''')
-
-init_db()
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS infractions (
+                user_id INTEGER,
+                guild_id INTEGER,
+                points INTEGER DEFAULT 0,
+                timestamp TEXT,
+                PRIMARY KEY (user_id, guild_id)
+            ''')
 
 ACTIVE_MUTES = {}
 
@@ -184,8 +188,8 @@ async def apply_punishment(member, action, duration=None):
 async def log_violation(member, violation_type, message):
     with sqlite3.connect('infractions.db') as conn:
         cursor = conn.cursor()
-        
         points = PUNISHMENT_SYSTEM["violations"][violation_type]["points"]
+        
         cursor.execute('''
             INSERT INTO infractions (user_id, guild_id, points, timestamp)
             VALUES (?, ?, ?, ?)
@@ -194,13 +198,15 @@ async def log_violation(member, violation_type, message):
                 timestamp = excluded.timestamp
         ''', (member.id, member.guild.id, points, datetime.utcnow().isoformat()))
         
-        total_points = cursor.execute('SELECT SUM(points) FROM infractions WHERE user_id=?', 
-                                    (member.id,)).fetchone()[0]
+        total_points = cursor.execute('''
+            SELECT points FROM infractions 
+            WHERE user_id = ? AND guild_id = ?
+        ''', (member.id, member.guild.id)).fetchone()[0]
         
     for threshold in sorted(PUNISHMENT_SYSTEM["points_thresholds"].keys(), reverse=True):
         if total_points >= threshold:
             punishment = PUNISHMENT_SYSTEM["points_thresholds"][threshold]
-            await apply_punishment(member, **punishment)
+            await apply_punishment(member, action=punishment["action"], duration=punishment.get("duration"))
             break
 
 async def decay_points():
