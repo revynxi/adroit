@@ -120,7 +120,7 @@ RESTRICTED_PATTERNS = {
         r"\b(sex|porn|onlyfans|nsfw|dick|pussy|tits|anal|"
         r"masturbat(e|ion)|rape|pedo|underage)\b",
         re.IGNORECASE | re.VERBOSE
-    ),
+    )
 }
 
 PUNISHMENT_SYSTEM = {
@@ -136,7 +136,7 @@ PUNISHMENT_SYSTEM = {
         "spam": {"points": 2},
         "nsfw": {"points": 4},
         "advertising": {"points": 3},
-        "religion": {"points": 3},
+        "politics": {"points": 3},
         "off_topic": {"points": 1},
         "foreign_language": {"points": 2}
     }
@@ -318,8 +318,8 @@ async def on_message(message):
         if not any(topic in content_lower for topic in channel_cfg["topics"]):
             violations.add("off_topic")
     else:
-        if any(topic in content_lower for topic in ["politics", "religion"]):
-            violations.add("religion")
+        if any(topic in content_lower for topic in ["politics"]):
+            violations.add("politics")
 
     if violations:
         await message.delete()
