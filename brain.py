@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from aiohttp import web
+from aiohttp import web, ClientSession
 import asyncio
 import os
 import re
