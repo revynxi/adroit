@@ -9,11 +9,16 @@ import sqlite3
 from discord.ext import commands
 from dotenv import load_dotenv
 
+def clean_message_content(text):
+    text = re.sub(r'<@!?\d+>|https?://\S+', '', text)  
+    text = re.sub(r'[\U00010000-\U0010ffff]', '', text) 
+    return text[:850]  
+    
 async def detect_language_ai(text):
-    clean_text = re.sub(r'<@!?\d+>|https?://\S+', '', text)[:512]
+    clean_text = clean_message_content(text)
     model = fasttext.load_model("lid.176.bin")
     lang = model.predict(clean_text)[0][0].replace("__label__", "")
-    return lang  
+    return lang
     
 async def handle(request):
     return web.Response(
@@ -38,6 +43,13 @@ async def start_http_server():
         print(f"❌ Failed to start HTTP server: {e}")
 
 load_dotenv()
+
+def init_db():
+    with sqlite3.connect('infractions.db') as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS infractions
+                     (user_id INTEGER, guild_id INTEGER, points INTEGER, timestamp TEXT)''')
+
+init_db()
 
 ACTIVE_MUTES = {}
 
@@ -81,52 +93,56 @@ async def setup_hook():
     except Exception as e:
         print(f"Error during setup_hook: {e}")
 
-CHANNEL_LANGUAGES = {
-    1321499824926888049: ["fr"],
-    1122525009102000269: ["de"],
-    1122523546355245126: ["ru"],
-    1122524817904635904: ["zh"],  
-    1242768362237595749: ["es"],
-    1113377809440722974: ["en"],
-    1322517478365990984: ["en"],
-    1113377810476716132: ["en"],
+CHANNEL_CONFIG = {
+    1113377809440722974: {"language": ["en"]},
+    1322517478365990984: {"language": ["en"], "topics": ["politics"]},
+    1113377810476716132: {"language": ["en"]},
+    1321499824926888049: {"language": ["fr"]},
+    1122525009102000269: {"language": ["de"]},
+    1122523546355245126: {"language": ["ru"]},
+    1122524817904635904: {"language": ["zh"]},
+    1242768362237595749: {"language": ["es"]}
 }
-
-DESIGNATED_TOPICS_CHANNELS = {
-    1322517478365990984: ["politics"]
-}
-
-RESTRICTED_TOPICS = ["religion", "politics"]
 
 RESTRICTED_PATTERNS = {
-    "politics": re.compile(r"\b(protest|riot)\b", re.I),
-    "conflict": re.compile(r"\b(terrorism)\b", re.I)
+    "discrimination": re.compile(r"""
+        \b(nigg(a|er)|chink|spic|kike|fag|retard|tranny|
+        white\s+power|black\s+lives|all\s+lives\s+matter|
+        islamophobi(a|c)|anti[\s-]?semiti(sm|c)\b
+    """, re.I|re.X),
+    
+    "advertising": re.compile(r"""
+        (discord\.gg/|join\s+our|server\s+invite|
+        free\s+nitro|http(s)?://|www\.|\.com|\.net|\.org)
+    """, re.I|re.X),
+    
+    "nsfw": re.compile(r"""
+        \b(sex|porn|onlyfans|nsfw|dick|pussy|tits|anal|
+        masturbat(e|ion)|rape|pedo|underage)\b
+    """, re.I|re.X)
 }
 
-PUNISHMENTS = {
-    "discrimination": {"action": "mute", "duration": timedelta(minutes=15), "severity": 5, "aka": 'Discrimination'},
-    "spam": {"action": "mute", "duration": timedelta(minutes=20), "severity": 3, "aka": 'Spam'},
-    "nsfw": {"action": "mute", "duration": timedelta(minutes=45), "severity": 7, "aka": 'NSFW'},
-    "tos_violation": {"action": "mute", "duration": timedelta(hours=1), "severity": 8, "aka": 'ToS Violation'},
-    "off_topic": {"action": "mute", "duration": timedelta(minutes=10), "severity": 2, "aka": 'Off-topic'},
-    "restricted_topic": {"action": "mute", "duration": timedelta(minutes=15), "severity": 4, "aka": 'Restricted topic'},
-    "advertising": {"action": "mute", "duration": timedelta(minutes=30), "severity": 6, "aka": 'Advertising'},
-    "foreign_language": {"action": "mute", "duration": timedelta(minutes=5), "severity": 1, "aka": 'Foreign language'}
+PUNISHMENT_SYSTEM = {
+    "points_thresholds": {
+        3: {"action": "warn", "message": "Warnings make your sins weigh harder, think twice before sending something"},
+        5: {"action": "mute", "duration": timedelta(hours=1)},
+        7: {"action": "kick"},
+        10: {"action": "temp_ban", "duration": timedelta(days=1)},
+        20: {"action": "ban")
+    },
+    "violations": {
+        "discrimination": {"points": 5},
+        "spam": {"points": 2},
+        "nsfw": {"points": 4},
+        "advertising": {"points": 3},
+        "religion": {"points": 3},
+        "off_topic": {"points": 1},
+        "foreign_language": {"points": 2}
+    }
 }
-
-DISCRIMINATION_PATTERNS = [
-    re.compile(r"\b(nigg(a|er)|chink|spic|kike|fag)\b", re.I),
-    re.compile(r"\b(white power|black lives)\b", re.I)
-]
 
 user_message_count = {}
 last_message_times = {}
-
-async def detect_language_ai(text):
-    clean_text = re.sub(r'<@!?\d+>|https?://\S+', '', text)[:512]
-    model = fasttext.load_model("lid.176.bin")
-    lang = model.predict(clean_text)[0][0].replace("__label__", "")
-    return lang
 
 async def check_openai_moderation(text):
     url = "https://api.openai.com/v1/moderations"
@@ -138,73 +154,66 @@ async def check_openai_moderation(text):
             result = await response.json()
             return result.get("results", [{}])[0]
 
-async def enforce_punishment(member, action, duration=None):
+async def apply_punishment(member, action, duration=None):
     try:
         if action == "mute":
-            muted_role = discord.utils.get(member.guild.roles, name="『Arrested』")
-            if not muted_role:
-                muted_role = await member.guild.create_role(
-                    name="『Arrested』",
-                    color=discord.Color.dark_red(),
-                    reason="Automatic role creation for moderation"
-                )
-                for channel in member.guild.channels:
-                    if isinstance(channel, discord.TextChannel):
-                        await channel.set_permissions(
-                            muted_role,
-                            send_messages=False,
-                            add_reactions=False,
-                            create_public_threads=False,
-                            send_messages_in_threads=False
-                        )
-            await member.add_roles(muted_role, reason="Automatic moderation action")
+            role = discord.utils.get(member.guild.roles, name="『Arrested』") or \
+                   await member.guild.create_role(name="『Arrested』", color=discord.Color.dark_red())
+            
+            for channel in member.guild.text_channels:
+                await channel.set_permissions(role, send_messages=False)
+                
+            await member.add_roles(role)
             if duration:
-                unmute_time = datetime.utcnow() + duration
-                if member.guild.id not in ACTIVE_MUTES:
-                    ACTIVE_MUTES[member.guild.id] = {}
-                ACTIVE_MUTES[member.guild.id][member.id] = unmute_time
-                save_mutes()
+                await asyncio.sleep(duration.total_seconds())
+                await member.remove_roles(role)
+                
+        elif action == "temp_ban":
+            await member.ban(reason="Temporary ban")
+            if duration:
+                await asyncio.sleep(duration.total_seconds())
+                await member.guild.unban(member)
                 
         elif action == "ban":
-            await member.ban(reason="Severe ToS violation", delete_message_days=1)
+            await member.ban(reason="Permanent ban")
             
     except Exception as e:
-        print(f"Failed to enforce punishment: {e}")
-        log_channel = discord.utils.get(member.guild.channels, name="『📄』staff-logs")
-        if log_channel:
-            await log_channel.send(f"⚠️ Failed to punish {member.mention}: {str(e)}")
+        print(f"Punishment error: {e}")
+            
+async def log_violation(member, violation_type, message):
+    with sqlite3.connect('infractions.db') as conn:
+        cursor = conn.cursor()
+        
+        points = PUNISHMENT_SYSTEM["violations"][violation_type]["points"]
+        cursor.execute('''
+            INSERT INTO infractions (user_id, guild_id, points, timestamp)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, guild_id) DO UPDATE SET
+                points = points + excluded.points,
+                timestamp = excluded.timestamp
+        ''', (member.id, member.guild.id, points, datetime.utcnow().isoformat()))
+        
+        total_points = cursor.execute('SELECT SUM(points) FROM infractions WHERE user_id=?', 
+                                    (member.id,)).fetchone()[0]
+        
+    for threshold in sorted(PUNISHMENT_SYSTEM["points_thresholds"].keys(), reverse=True):
+        if total_points >= threshold:
+            punishment = PUNISHMENT_SYSTEM["points_thresholds"][threshold]
+            await apply_punishment(member, **punishment)
+            break
 
-async def log_action(guild, violations, message_content, punishment, author):
-    log_channel = discord.utils.get(guild.channels, name="『📄』staff-logs")
-    if log_channel:
-        aka_violations = [
-            PUNISHMENTS.get(violation, {}).get("aka", violation.title())
-            for violation in violations
-        ]
-        
-        embed = discord.Embed(
-            title="🚨 Moderation Action",
-            description=f"**User:** {author.mention}\n"
-                       f"**Action Taken:** {punishment['action'].title()}\n"
-                       f"**Duration:** {str(punishment['duration']) if punishment.get('duration') else 'Permanent'}",
-            color=discord.Color.red() if punishment.get('severity', 0) >=5 else discord.Color.orange(),
-            timestamp=datetime.utcnow()
-        )
-        
-        embed.add_field(
-            name="Detected Violations",
-            value=", ".join(aka_violations),
-            inline=False
-        )
-        embed.add_field(
-            name="Message Content",
-            value=f"```{message_content[:1000]}```",
-            inline=False
-        )
-        
-        embed.set_footer(text=f"User ID: {author.id}")
-        await log_channel.send(embed=embed)
+async def decay_points():
+    while True:
+        await asyncio.sleep(86400) 
+        with sqlite3.connect('infractions.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                DELETE FROM infractions
+                WHERE datetime(timestamp) < datetime('now', '-28 days')
+            ''')
+            conn.commit()
 
+    
 async def cleanup_message_counts():
     while True:
         await asyncio.sleep(3600)  
@@ -221,6 +230,8 @@ async def on_ready():
 
     print(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
     print("------")
+
+    await start_http_server()
     
     global ACTIVE_MUTES
     ACTIVE_MUTES = load_mutes()
@@ -228,6 +239,7 @@ async def on_ready():
     bot.loop.create_task(check_mutes_loop())
     bot.loop.create_task(cleanup_message_counts())
     bot.loop.create_task(start_http_server())
+    bot.loop.create_task(decay_points())
     gc.collect()
     
     try:
@@ -282,106 +294,40 @@ async def classify(ctx, *, text):
 
 @bot.event
 async def on_message(message):
-    if message.author.bot:
+    if message.author.bot or not message.guild:
         return
-        
-    violations = set()
-    punishment = None
-    current_time = datetime.utcnow()
-
-    channel_id = message.channel.id
-    allowed_languages = CHANNEL_LANGUAGES.get(channel_id, ["any"])
     
-    if allowed_languages != ["any"]:  
-        lang = await detect_language_ai(message.content)
-        if lang and lang not in allowed_languages:
+    violations = set()
+    channel_cfg = CHANNEL_CONFIG.get(message.channel.id, {})
+
+    if "language" in channel_cfg:
+        detected_lang = await detect_language_ai(message.content)
+        if detected_lang not in channel_cfg["language"]:
             violations.add("foreign_language")
 
-    content_lower = message.content.lower()
-    if channel_id not in DESIGNATED_TOPICS_CHANNELS:
-        for topic, pattern in RESTRICTED_PATTERNS.items():
-            if pattern.search(message.content):
-                violations.add("restricted_topic")
-                break
-    else:
-        allowed_topics = DESIGNATED_TOPICS_CHANNELS[channel_id]
-        if not any(topic in content_lower for topic in allowed_topics):
-            violations.add("off_topic")
-
-    user_id = message.author.id
-    now = datetime.utcnow()
-    if user_id in last_message_times:
-        time_diff = (now - last_message_times[user_id]).total_seconds()
-        if time_diff > 10:
-            user_message_count[user_id] = 0
-
-    user_message_count[user_id] = user_message_count.get(user_id, 0) + 1
-    last_message_times[user_id] = now
-    if user_message_count[user_id] > 5:
+    if len(message.content) > 850 or len(message.attachments) > 4:
         violations.add("spam")
 
-    for pattern in DISCRIMINATION_PATTERNS:
-        if pattern.search(message.content):
-            violations.add("discrimination")
-            break
-    
-    moderation_result = await check_openai_moderation(message.content)
-    if moderation_result.get("flagged"):
-        categories = moderation_result.get("categories", {})
-        if categories.get("sexual") or categories.get("nsfw"):
-            violations.add("nsfw")
-        if categories.get("hate"):
-            violations.add("discrimination")
-        if categories.get("violence"):
-            violations.add("tos_violation")
+    content_lower = message.content.lower()
+    for pattern_type, pattern in RESTRICTED_PATTERNS.items():
+        if pattern.search(content_lower):
+            violations.add(pattern_type)
 
-    try:
-        await bot.process_commands(message)
-        if violations:
-            max_severity = max(PUNISHMENTS[violation]["severity"] for violation in violations)
-            punishment = next(
-                (PUNISHMENTS[v] for v in violations if PUNISHMENTS[v]["severity"] == max_severity),
-                None
-            )
+    if "topics" in channel_cfg:
+        if not any(topic in content_lower for topic in channel_cfg["topics"]):
+            violations.add("off_topic")
+    else:
+        if any(topic in content_lower for topic in ["politics", "religion"]):
+            violations.add("religion")
 
-            if punishment:
-                try:
-                    await message.delete()
-                except discord.NotFound:
-                    pass
-                
-                duration = punishment.get('duration')
-                
-                await asyncio.gather(
-                    enforce_punishment(message.author, **punishment),
-                    log_action(
-                        guild=message.guild,
-                        violations=violations,
-                        message_content=message.content,
-                        punishment=punishment,
-                        author=message.author
-                    )
-                )
-    except Exception as e:
-        error_punishment = {
-            "action": "error",
-            "duration": None,
-            "severity": 0
-        }    
-        error_msg = f"❌ Error processing message from {message.author}: {str(e)}"
-        await log_action(
-            message.guild, 
-            {"system_error"},
-            error_msg,
-            error_punishment,
-            message.author
-        )
+    if violations:
+        await message.delete()
+        for violation in violations:
+            await log_violation(message.author, violation, message.content)
+        
+        warning_msg = f"{message.author.mention} Violation detected: {', '.join(violations)}"
+        await message.channel.send(warning_msg, delete_after=10)
 
-@bot.event
-async def on_message_delete(message):
-    await asyncio.sleep(15)
-    user_id = message.author.id
-    if user_id in user_message_count:
-        del user_message_count[user_id]
+    await bot.process_commands(message)
 
 bot.run(os.getenv("ADROIT_TOKEN"))
