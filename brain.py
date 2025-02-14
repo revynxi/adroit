@@ -328,7 +328,15 @@ async def on_message(message):
             violations.add("politics")
 
     if violations:
-        await message.delete()
+        try:
+            await message.delete()
+        except discord.NotFound:
+            pass
+        except discord.Forbidden:
+            print(f"Missing permissions to delete message in {message.channel.name}")
+        except Exception as e:
+            print(f"Error deleting message: {e}")
+
         for violation in violations:
             await log_violation(message.author, violation, message.content)
         
