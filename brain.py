@@ -128,7 +128,7 @@ PUNISHMENT_SYSTEM = {
         5: {"action": "mute", "duration": timedelta(hours=1)},
         7: {"action": "kick"},
         10: {"action": "temp_ban", "duration": timedelta(days=1)},
-        20: {"action": "ban")
+        20: {"action": "ban"}
     },
     "violations": {
         "discrimination": {"points": 5},
