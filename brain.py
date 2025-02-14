@@ -120,7 +120,7 @@ RESTRICTED_PATTERNS = {
         r"\b(sex|porn|onlyfans|nsfw|dick|pussy|tits|anal|"
         r"masturbat(e|ion)|rape|pedo|underage)\b",
         re.IGNORECASE | re.VERBOSE
-    )
+    ),
 }
 
 PUNISHMENT_SYSTEM = {
