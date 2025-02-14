@@ -108,7 +108,7 @@ RESTRICTED_PATTERNS = {
     "discrimination": re.compile(
         r"\b(nigg(a|er)|chink|spic|kike|fag|retard|tranny|"
         r"white\s+power|black\s+lives|all\s+lives\s+matter|"
-        r"islamophobi(a|c)|anti[\s-]?semiti(sm|c)\b",
+        r"islamophobi(a|c)|anti[\s-]?semiti(sm|c))\b",
         re.IGNORECASE | re.VERBOSE
     ),
     "advertising": re.compile(
