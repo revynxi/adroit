@@ -1,8 +1,5 @@
 discord.py
-flask
-openai
-python-dotenv
-langdetect
+aiosqlite
+fasttext
 aiohttp
-fasttext-wheel
-waitress
+python-dotenv
