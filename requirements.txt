@@ -3,3 +3,4 @@ aiosqlite
 fasttext
 aiohttp
 python-dotenv
+luga
