@@ -13,7 +13,6 @@ from luga import language
 from collections import deque
 
 load_dotenv()
-init_db()
 
 intents = discord.Intents.default()
 intents.members = True
