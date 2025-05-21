@@ -407,10 +407,10 @@ async def on_message(message):
 
     # Discrimination and NSFW detection
     words = re.findall(r'\b\w+\b', content_lower)
-    if any(word in discrimination_words for word in words) or any(discrimination_automaton.iter(content_lower)):
+    if any(word in discrimination_words for word in words) or any(pattern.search(content_lower) for pattern in discrimination_patterns):
         violations.add("discrimination")
-    
-    if any(word in nsfw_words for word in words) or any(nsfw_automaton.iter(content_lower)):
+
+    if any(word in nsfw_words for word in words) or any(pattern.search(content_lower) for pattern in nsfw_patterns):
         violations.add("nsfw")
 
     # Topic enforcement
