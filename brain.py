@@ -80,15 +80,14 @@ def clean_message_content(text):
 
 async def load_model():
     """Load the FastText language model once at startup."""
-    global LANGUAGE_MODEL
-    if LANGUAGE_MODEL is None:
-        try:
-            model_path = os.getenv("FASTTEXT_MODEL_PATH", "lid.176.bin")
-            LANGUAGE_MODEL = fasttext.load_model(model_path)
-            print(f"Successfully loaded FastText model from {model_path}")
-        except Exception as e:
-            print(f"Failed to load FastText model: {e}")
-            raise 
+    model_path = "lid.176.ftz" 
+    try:
+        global LANGUAGE_MODEL
+        LANGUAGE_MODEL = fasttext.load_model(model_path)
+        print(f"Successfully loaded FastText model from {model_path}")
+    except Exception as e:
+        print(f"Failed to load FastText model: {e}")
+        raise 
 
 async def detect_language_ai(text):
     """Detect the language of the given text using FastText."""
