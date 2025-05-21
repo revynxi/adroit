@@ -10,6 +10,8 @@ import fasttext
 from dotenv import load_dotenv
 from urllib.parse import urlparse
 from luga import language
+import ahocorasick
+from collections import deque
 
 load_dotenv()
 
@@ -19,7 +21,8 @@ intents.message_content = True
 bot = commands.Bot(command_prefix=">>", intents=intents)
 
 LANGUAGE_MODEL = None
-user_message_count = {} 
+user_message_count = {}
+user_message_history = {}  # guild_id: {user_id: deque of last 5 messages}
 LOG_CHANNEL_ID = 1113377818424922132
 
 CHANNEL_CONFIG = {
@@ -33,21 +36,10 @@ CHANNEL_CONFIG = {
     1242768362237595749: {"language": ["es"]}
 }
 
-RESTRICTED_PATTERNS = {
-    "discrimination": re.compile(
-        r"\b(nigg(a|er)|chink|spic|kike|fag|retard|tranny|"
-        r"white\s+power|black\s+lives|all\s+lives\s+matter|"
-        r"islamophobi(a|c)|anti[\s-]?semiti(sm|c))\b",
-        re.IGNORECASE | re.VERBOSE
-    ),
-    "nsfw": re.compile(
-        r"\b(sex|porn|onlyfans|nsfw|dick|pussy|tits|anal|"
-        r"masturbat(e|ion)|rape|pedo|underage)\b",
-        re.IGNORECASE | re.VERBOSE
-    )
-}
-
-forbidden_text_pattern = re.compile(r"(discord\.gg/|join\s+our|server\s+invite|free\s+nitro)", re.IGNORECASE)
+forbidden_text_pattern = re.compile(
+    r"(discord\.gg/|join\s+our|server\s+invite|free\s+nitro|check out my|follow me|subscribe to|buy now)",
+    re.IGNORECASE
+)
 url_pattern = re.compile(r"(https?://\S+|www\.\S+|\b\S+\.(com|net|org)\b)")
 permitted_domains = ["youtube.com", "youtu.be", "tenor.com", "giphy.com", "tiktok.com"]
 
@@ -73,21 +65,65 @@ PUNISHMENT_SYSTEM = {
 
 SPAM_WINDOW = 10
 SPAM_LIMIT = 5
+MENTION_LIMIT = 5
+
+# Load terms for discrimination and NSFW detection
+discrimination_words = set()
+discrimination_phrases = []
+nsfw_words = set()
+nsfw_phrases = []
+
+try:
+    with open('discrimination_terms.txt', 'r') as f:
+        for line in f:
+            term = line.strip().lower()
+            if ' ' in term:
+                discrimination_phrases.append(term)
+            else:
+                discrimination_words.add(term)
+except FileNotFoundError:
+    print("Warning: discrimination_terms.txt not found. Using empty list.")
+    discrimination_phrases = []
+    discrimination_words = set()
+
+try:
+    with open('nsfw_terms.txt', 'r') as f:
+        for line in f:
+            term = line.strip().lower()
+            if ' ' in term:
+                nsfw_phrases.append(term)
+            else:
+                nsfw_words.add(term)
+except FileNotFoundError:
+    print("Warning: nsfw_terms.txt not found. Using empty list.")
+    nsfw_phrases = []
+    nsfw_words = set()
+
+# Create Aho-Corasick automatons for phrase matching
+discrimination_automaton = ahocorasick.Automaton()
+for phrase in discrimination_phrases:
+    discrimination_automaton.add_word(phrase, phrase)
+discrimination_automaton.make_automaton()
+
+nsfw_automaton = ahocorasick.Automaton()
+for phrase in nsfw_phrases:
+    nsfw_automaton.add_word(phrase, phrase)
+nsfw_automaton.make_automaton()
 
 def clean_message_content(text):
-    """Clean the message text (example implementation)."""
+    """Clean the message text."""
     return text.strip()
 
 async def load_model():
     """Load the FastText language model once at startup."""
-    model_path = "lid.176.ftz" 
+    model_path = "lid.176.ftz"
     try:
         global LANGUAGE_MODEL
         LANGUAGE_MODEL = fasttext.load_model(model_path)
         print(f"Successfully loaded FastText model from {model_path}")
     except Exception as e:
         print(f"Failed to load FastText model: {e}")
-        raise 
+        raise
 
 async def detect_language_ai(text):
     """Detect the language of the given text using FastText."""
@@ -98,7 +134,7 @@ async def detect_language_ai(text):
         return prediction[0][0].replace("__label__", "")
     except Exception as e:
         print(f"Language detection error: {e}")
-        return "en" 
+        return "en"
 
 async def init_db():
     """Initialize the SQLite database for infractions and guild configs."""
@@ -319,10 +355,11 @@ async def on_message(message):
 
     violations = set()
     channel_cfg = CHANNEL_CONFIG.get(message.channel.id, {})
-
-    # Guild-specific spam detection
+    content_lower = message.content.lower()
     guild_id = message.guild.id
     user_id = message.author.id
+
+    # Spam detection: message frequency
     if guild_id not in user_message_count:
         user_message_count[guild_id] = {}
     if user_id not in user_message_count[guild_id]:
@@ -340,13 +377,26 @@ async def on_message(message):
     elif len(message.content) > 850 or len(message.attachments) > 4:
         violations.add("spam")
 
+    # Spam detection: repeated messages and excessive mentions
+    if guild_id not in user_message_history:
+        user_message_history[guild_id] = {}
+    if user_id not in user_message_history[guild_id]:
+        user_message_history[guild_id][user_id] = deque(maxlen=5)
+    else:
+        if message.content in user_message_history[guild_id][user_id]:
+            violations.add("spam")
+        user_message_history[guild_id][user_id].append(message.content)
+    
+    if len(message.mentions) > MENTION_LIMIT:
+        violations.add("spam")
+
+    # Language detection
     if "language" in channel_cfg:
         detected_lang = await detect_language_ai(message.content)
         if detected_lang not in channel_cfg["language"]:
             violations.add("foreign_language")
 
-    content_lower = message.content.lower()
-    
+    # Advertising detection
     async with aiosqlite.connect('infractions.db') as conn:
         cursor = await conn.execute('SELECT link_channel_id FROM guild_configs WHERE guild_id = ?', (message.guild.id,))
         result = await cursor.fetchone()
@@ -358,22 +408,31 @@ async def on_message(message):
     if message.channel.id != link_channel_id:
         urls = url_pattern.findall(message.content)
         for url in urls:
-            domain = get_domain(url)
+            domain = get_domain(url[0] if isinstance(url, tuple) else url)
             if domain and not is_permitted_domain(domain):
                 violations.add("advertising")
                 break
 
-    for pattern_type, pattern in RESTRICTED_PATTERNS.items():
-        if pattern.search(content_lower):
-            violations.add(pattern_type)
+    # Discrimination and NSFW detection
+    words = re.findall(r'\b\w+\b', content_lower)
+    if any(word in discrimination_words for word in words) or any(discrimination_automaton.iter(content_lower)):
+        violations.add("discrimination")
+    
+    if any(word in nsfw_words for word in words) or any(nsfw_automaton.iter(content_lower)):
+        violations.add("nsfw")
 
+    # Topic enforcement
     if "topics" in channel_cfg:
         if not any(topic in content_lower for topic in channel_cfg["topics"]):
             violations.add("off_topic")
     else:
-        if any(topic in content_lower for topic in ["politics"]):
+        if any(term in content_lower for term in [
+            "politics", "religion", "god", "allah", "jesus", "church", "mosque",
+            "temple", "bible", "quran", "torah", "democrat", "republican", "liberal", "conservative"
+        ]):
             violations.add("politics")
 
+    # OpenAI moderation
     if not violations:
         try:
             moderation_result = await check_openai_moderation(message.content)
