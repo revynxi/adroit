@@ -8,6 +8,7 @@ from aiohttp import web, ClientSession
 import aiosqlite
 import fasttext
 from dotenv import load_dotenv
+from urllib.parse import urlparse
 
 load_dotenv()
 
@@ -17,8 +18,8 @@ intents.message_content = True
 bot = commands.Bot(command_prefix=">>", intents=intents)
 
 LANGUAGE_MODEL = None
-user_message_count = {}
-LOG_CHANNEL_ID = 1113377818424922132 
+user_message_count = {} 
+LOG_CHANNEL_ID = 1113377818424922132
 
 CHANNEL_CONFIG = {
     1113377809440722974: {"language": ["en"]},
@@ -38,17 +39,16 @@ RESTRICTED_PATTERNS = {
         r"islamophobi(a|c)|anti[\s-]?semiti(sm|c))\b",
         re.IGNORECASE | re.VERBOSE
     ),
-    "advertising": re.compile(
-        r"(discord\.gg/|join\s+our|server\s+invite|"
-        r"free\s+nitro|http(s)?://|www\.|\.com|\.net|\.org)",
-        re.IGNORECASE | re.VERBOSE
-    ),
     "nsfw": re.compile(
         r"\b(sex|porn|onlyfans|nsfw|dick|pussy|tits|anal|"
         r"masturbat(e|ion)|rape|pedo|underage)\b",
         re.IGNORECASE | re.VERBOSE
     )
 }
+
+forbidden_text_pattern = re.compile(r"(discord\.gg/|join\s+our|server\s+invite|free\s+nitro)", re.IGNORECASE)
+url_pattern = re.compile(r"(https?://\S+|www\.\S+|\b\S+\.(com|net|org)\b)")
+permitted_domains = ["youtube.com", "youtu.be", "tenor.com", "giphy.com", "tiktok.com"]
 
 PUNISHMENT_SYSTEM = {
     "points_thresholds": {
@@ -70,8 +70,8 @@ PUNISHMENT_SYSTEM = {
     }
 }
 
-SPAM_WINDOW = 10 
-SPAM_LIMIT = 5  
+SPAM_WINDOW = 10
+SPAM_LIMIT = 5
 
 def clean_message_content(text):
     """Clean message content by removing mentions and URLs."""
@@ -87,12 +87,12 @@ async def load_model():
 async def detect_language_ai(text):
     """Detect the language of the given text using FastText."""
     clean_text = clean_message_content(text)
-    await load_model()  # Ensure model is loaded
+    await load_model()
     prediction = LANGUAGE_MODEL.predict(clean_text)
     return prediction[0][0].replace("__label__", "")
 
 async def init_db():
-    """Initialize the SQLite database for infractions."""
+    """Initialize the SQLite database for infractions and guild configs."""
     async with aiosqlite.connect('infractions.db') as conn:
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS infractions (
@@ -101,6 +101,12 @@ async def init_db():
                 guild_id INTEGER,
                 points INTEGER,
                 timestamp TEXT
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS guild_configs (
+                guild_id INTEGER PRIMARY KEY,
+                link_channel_id INTEGER
             )
         ''')
         await conn.commit()
@@ -209,10 +215,16 @@ async def decay_points():
 async def cleanup_message_counts():
     """Clean up message count tracking for inactive users."""
     now = datetime.utcnow()
-    to_remove = [uid for uid, times in user_message_count.items()
-                 if all((now - t).total_seconds() > 86400 for t in times)]
-    for uid in to_remove:
-        del user_message_count[uid]
+    for guild_id in list(user_message_count.keys()):
+        for user_id in list(user_message_count[guild_id].keys()):
+            user_message_count[guild_id][user_id] = [
+                t for t in user_message_count[guild_id][user_id]
+                if (now - t).total_seconds() < 86400
+            ]
+            if not user_message_count[guild_id][user_id]:
+                del user_message_count[guild_id][user_id]
+        if not user_message_count[guild_id]:
+            del user_message_count[guild_id]
 
 @bot.event
 async def setup_hook():
@@ -249,6 +261,48 @@ async def classify(ctx, *, text):
         print(f"Classification error: {e}")
         await ctx.send("Error processing request.")
 
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def set_link_channel(ctx, channel: discord.TextChannel):
+    """Set the channel where links are allowed."""
+    async with aiosqlite.connect('infractions.db') as conn:
+        await conn.execute('''
+            INSERT OR REPLACE INTO guild_configs (guild_id, link_channel_id)
+            VALUES (?, ?)
+        ''', (ctx.guild.id, channel.id))
+        await conn.commit()
+    await ctx.send(f"Link posting channel set to {channel.mention}")
+
+@bot.command()
+@commands.has_permissions(manage_messages=True)
+async def infractions(ctx, member: discord.Member):
+    """View a user's infraction history."""
+    async with aiosqlite.connect('infractions.db') as conn:
+        cursor = await conn.execute('''
+            SELECT points, timestamp FROM infractions 
+            WHERE user_id = ? AND guild_id = ?
+            ORDER BY timestamp DESC
+        ''', (member.id, ctx.guild.id))
+        records = await cursor.fetchall()
+        if records:
+            response = f"Infractions for {member.display_name}:\n"
+            for points, timestamp in records:
+                response += f"- {points} points on {timestamp}\n"
+            await ctx.send(response)
+        else:
+            await ctx.send(f"No infractions found for {member.display_name}.")
+
+def get_domain(url):
+    """Extract the domain from a URL."""
+    if not url.startswith('http'):
+        url = 'http://' + url
+    parsed = urlparse(url)
+    return parsed.netloc
+
+def is_permitted_domain(domain):
+    """Check if the domain is in the permitted list."""
+    return any(domain == perm or domain.endswith('.' + perm) for perm in permitted_domains)
+
 @bot.event
 async def on_message(message):
     """Handle incoming messages and apply moderation rules."""
@@ -258,13 +312,22 @@ async def on_message(message):
     violations = set()
     channel_cfg = CHANNEL_CONFIG.get(message.channel.id, {})
 
-    now = datetime.utcnow()
+    # Guild-specific spam detection
+    guild_id = message.guild.id
     user_id = message.author.id
-    if user_id not in user_message_count:
-        user_message_count[user_id] = []
-    user_message_count[user_id] = [t for t in user_message_count[user_id] if (now - t).total_seconds() < SPAM_WINDOW]
-    user_message_count[user_id].append(now)
-    if len(user_message_count[user_id]) > SPAM_LIMIT:
+    if guild_id not in user_message_count:
+        user_message_count[guild_id] = {}
+    if user_id not in user_message_count[guild_id]:
+        user_message_count[guild_id][user_id] = []
+    
+    now = datetime.utcnow()
+    user_message_count[guild_id][user_id] = [
+        t for t in user_message_count[guild_id][user_id]
+        if (now - t).total_seconds() < SPAM_WINDOW
+    ]
+    user_message_count[guild_id][user_id].append(now)
+    
+    if len(user_message_count[guild_id][user_id]) > SPAM_LIMIT:
         violations.add("spam")
     elif len(message.content) > 850 or len(message.attachments) > 4:
         violations.add("spam")
@@ -275,6 +338,23 @@ async def on_message(message):
             violations.add("foreign_language")
 
     content_lower = message.content.lower()
+    
+    async with aiosqlite.connect('infractions.db') as conn:
+        cursor = await conn.execute('SELECT link_channel_id FROM guild_configs WHERE guild_id = ?', (message.guild.id,))
+        result = await cursor.fetchone()
+        link_channel_id = result[0] if result else None
+
+    if forbidden_text_pattern.search(content_lower):
+        violations.add("advertising")
+
+    if message.channel.id != link_channel_id:
+        urls = url_pattern.findall(message.content)
+        for url in urls:
+            domain = get_domain(url)
+            if domain and not is_permitted_domain(domain):
+                violations.add("advertising")
+                break
+
     for pattern_type, pattern in RESTRICTED_PATTERNS.items():
         if pattern.search(content_lower):
             violations.add(pattern_type)
