@@ -10,7 +10,6 @@ import fasttext
 from dotenv import load_dotenv
 from urllib.parse import urlparse
 from luga import language
-import pyahocorasick
 from collections import deque
 
 load_dotenv()
@@ -99,16 +98,8 @@ except FileNotFoundError:
     nsfw_phrases = []
     nsfw_words = set()
 
-# Create Aho-Corasick automatons for phrase matching
-discrimination_automaton = pyahocorasick.Automaton()
-for phrase in discrimination_phrases:
-    discrimination_automaton.add_word(phrase, phrase)
-discrimination_automaton.make_automaton()
-
-nsfw_automaton = pyahocorasick.Automaton()
-for phrase in nsfw_phrases:
-    nsfw_automaton.add_word(phrase, phrase)
-nsfw_automaton.make_automaton()
+discrimination_patterns = [re.compile(r'\b' + re.escape(phrase) + r'\b', re.IGNORECASE) for phrase in discrimination_phrases]
+nsfw_patterns = [re.compile(r'\b' + re.escape(phrase) + r'\b', re.IGNORECASE) for phrase in nsfw_phrases]
 
 def clean_message_content(text):
     """Clean the message text."""
