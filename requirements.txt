@@ -4,4 +4,3 @@ fasttext
 aiohttp
 python-dotenv
 luga
-pyahocorasick
