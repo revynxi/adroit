@@ -1,4 +1,4 @@
-FROM python:3.12-slim as builder
+FROM python:3.12-slim AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -13,15 +13,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 FROM python:3.12-slim
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    libgomp1 \  # Required for PyTorch
-    && rm -rf /var/lib/apt/lists/*
-    
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY . /app
+COPY src/ /app/src/
+COPY lid.176.ftz /app/
 WORKDIR /app
 
-CMD ["python", "bot.py"]
+CMD ["python", "src/brain.py"]
