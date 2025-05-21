@@ -1,3 +1,5 @@
+COPY lid.176.bin /app/
+
 FROM python:3.9-slim as builder
 
 RUN apt-get update && \
