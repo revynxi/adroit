@@ -10,7 +10,7 @@ import fasttext
 from dotenv import load_dotenv
 from urllib.parse import urlparse
 from luga import language
-import ahocorasick
+import pyahocorasick
 from collections import deque
 
 load_dotenv()
@@ -100,12 +100,12 @@ except FileNotFoundError:
     nsfw_words = set()
 
 # Create Aho-Corasick automatons for phrase matching
-discrimination_automaton = ahocorasick.Automaton()
+discrimination_automaton = pyahocorasick.Automaton()
 for phrase in discrimination_phrases:
     discrimination_automaton.add_word(phrase, phrase)
 discrimination_automaton.make_automaton()
 
-nsfw_automaton = ahocorasick.Automaton()
+nsfw_automaton = pyahocorasick.Automaton()
 for phrase in nsfw_phrases:
     nsfw_automaton.add_word(phrase, phrase)
 nsfw_automaton.make_automaton()
