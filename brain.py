@@ -82,14 +82,24 @@ async def load_model():
     """Load the FastText language model once at startup."""
     global LANGUAGE_MODEL
     if LANGUAGE_MODEL is None:
-        LANGUAGE_MODEL = fasttext.load_model("lid.176.bin")
+        try:
+            model_path = os.getenv("FASTTEXT_MODEL_PATH", "lid.176.bin")
+            LANGUAGE_MODEL = fasttext.load_model(model_path)
+            print(f"Successfully loaded FastText model from {model_path}")
+        except Exception as e:
+            print(f"Failed to load FastText model: {e}")
+            raise 
 
 async def detect_language_ai(text):
     """Detect the language of the given text using FastText."""
     clean_text = clean_message_content(text)
-    await load_model()
-    prediction = LANGUAGE_MODEL.predict(clean_text)
-    return prediction[0][0].replace("__label__", "")
+    try:
+        await load_model()
+        prediction = LANGUAGE_MODEL.predict(clean_text)
+        return prediction[0][0].replace("__label__", "")
+    except Exception as e:
+        print(f"Language detection error: {e}")
+        return "en" 
 
 async def init_db():
     """Initialize the SQLite database for infractions and guild configs."""
