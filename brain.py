@@ -13,6 +13,7 @@ from luga import language
 from collections import deque
 
 load_dotenv()
+init_db()
 
 intents = discord.Intents.default()
 intents.members = True
@@ -276,6 +277,7 @@ async def on_ready():
     """Handle bot startup tasks."""
     print(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
     print("------")
+    await init_db()
     await start_http_server()
     decay_points.start()
     cleanup_message_counts.start()
