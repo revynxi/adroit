@@ -9,6 +9,7 @@ import aiosqlite
 import fasttext
 from dotenv import load_dotenv
 from urllib.parse import urlparse
+from luga import language
 
 load_dotenv()
 
@@ -74,9 +75,8 @@ SPAM_WINDOW = 10
 SPAM_LIMIT = 5
 
 def clean_message_content(text):
-    """Clean message content by removing mentions and URLs."""
-    text = re.sub(r'<@!?\d+>|https?://\S+', '', text)
-    return text[:850]
+    """Clean the message text (example implementation)."""
+    return text.strip()
 
 async def load_model():
     """Load the FastText language model once at startup."""
@@ -238,8 +238,11 @@ async def cleanup_message_counts():
 @bot.event
 async def setup_hook():
     """Setup tasks and load resources before the bot starts."""
-    await load_model()
-    await init_db()
+    try:
+        language("test")
+        print("Luga model initialized")
+    except Exception as e:
+        print(f"Error initializing Luga: {e}")
 
 @bot.event
 async def on_ready():
@@ -261,14 +264,10 @@ async def awake(interaction: discord.Interaction):
     await interaction.response.send_message("Awake. Never Sleep.")
 
 @bot.command()
-async def classify(ctx, *, text):
-    """Classify the language of the provided text."""
-    try:
-        lang = await detect_language_ai(text)
-        await ctx.send(f"Detected language: {lang}")
-    except Exception as e:
-        print(f"Classification error: {e}")
-        await ctx.send("Error processing request.")
+async def beta_classify(ctx):
+    """Example command using language detection."""
+    lang = await detect_language_ai(ctx.message.content)
+    await ctx.send(f"LANG: {lang}")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
