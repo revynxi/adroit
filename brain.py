@@ -811,7 +811,7 @@ async def main():
     async with bot:
         await bot.add_cog(Moderation(bot))
         await bot.add_cog(BotInfo(bot))
-        await bot.start(DISCORD_TOKEN)
+        await bot.start(DISCORD_TOKEN) # Deus ex Machina
 
 if __name__ == "__main__":
     try:
