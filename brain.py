@@ -11,6 +11,7 @@ import fasttext
 from aiohttp import ClientSession, web
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+from discord import app_commands 
 
 load_dotenv()
 
@@ -744,10 +745,10 @@ class BotInfo(commands.Cog):
     def __init__(self, bot_instance: commands.Bot):
         self.bot = bot_instance
 
-    @bot.tree.command(name="awake", description="Check if the bot is awake.")
+    @app_commands.command(name="awake", description="Check if the bot is awake.")
     async def awake(self, interaction: discord.Interaction):
         """Respond to the awake command."""
-        await interaction.response.send_message("Awake. Never Sleep. (Bot is running and responsive.)", ephemeral=True)
+        await interaction.response.send_message("Awake. Never Sleep.", ephemeral=True)
 
     @commands.command()
     async def beta_classify(self, ctx: commands.Context):
