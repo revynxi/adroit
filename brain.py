@@ -12,6 +12,7 @@ from aiohttp import ClientSession, web
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from discord import app_commands 
+import httpx
 
 load_dotenv()
 
@@ -199,7 +200,6 @@ async def log_action(action: str, member: discord.Member, reason: str):
 
 
 async def check_openai_moderation(text: str) -> dict:
-    """Check message content using OpenAI's moderation API."""
     if not OPENAI_API_KEY:
         logger.warning("OPENAI_API_KEY not set. Skipping OpenAI moderation check.")
         return {"flagged": False, "categories": {}}
@@ -211,20 +211,29 @@ async def check_openai_moderation(text: str) -> dict:
     }
     data = {"input": text}
 
-    try:
-        async with http_session.post(url, headers=headers, json=data, timeout=5) as response:
-            response.raise_for_status() 
-            result = await response.json()
-            return result.get("results", [{}])[0]
-    except asyncio.TimeoutError:
-        logger.error("OpenAI moderation API request timed out.")
-        return {"flagged": False, "categories": {}}
-    except ClientSession.ClientError as e:
-        logger.error(f"HTTP error during OpenAI moderation check: {e}")
-        return {"flagged": False, "categories": {}}
-    except Exception as e:
-        logger.error(f"Unexpected error with OpenAI moderation API: {e}")
-        return {"flagged": False, "categories": {}}
+    retries = 3
+    for i in range(retries):
+        try:
+            async with http_session.post(url, headers=headers, json=data, timeout=5) as response:
+                response.raise_for_status()
+                return await response.json().get("results", [{}])[0]
+        except aiohttp.client_exceptions.ClientResponseError as e:
+            if e.status == 429:
+                retry_after = e.headers.get("Retry-After") 
+                wait_time = int(retry_after) if retry_after else (2 ** i) 
+                logger.warning(f"OpenAI moderation API hit rate limit (429). Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"HTTP error during OpenAI moderation check: {e}")
+                return {"flagged": False, "categories": {}}
+        except asyncio.TimeoutError:
+            logger.error("OpenAI moderation API request timed out.")
+            return {"flagged": False, "categories": {}}
+        except Exception as e:
+            logger.error(f"Unexpected error with OpenAI moderation API: {e}")
+            return {"flagged": False, "categories": {}}
+    logger.error(f"Failed to get OpenAI moderation response after {retries} retries.")
+    return {"flagged": False, "categories": {}}
 
 async def apply_punishment(member: discord.Member, action: str, reason: str, duration: timedelta = None):
     """Apply a punishment to a member based on infraction points."""
