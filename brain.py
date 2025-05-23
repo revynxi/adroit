@@ -40,100 +40,6 @@ db_conn: aiosqlite.Connection = None
 LANGUAGE_MODEL = None
 http_session: ClientSession = None
 
-class MediaChecker:
-    def __init__(self, sightengine_nsfw_threshold: float = 0.6):
-        self.sightengine_nsfw_threshold = sightengine_nsfw_threshold
-
-    async def check_media_nsfw_sightengine(self, media_url: str) -> bool:
-        """
-        Checks media content for NSFW using the Sightengine API.
-
-        Args:
-            media_url: The URL of the media to check.
-
-        Returns:
-            True if NSFW content is detected, False otherwise.
-        """
-        global http_session 
-
-        if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
-            logger.error("Sightengine API credentials not set. Skipping NSFW check for %s", media_url)
-            return False
-
-        if http_session is None or http_session.closed:
-            logger.warning("http_session was not initialized or was closed. Creating a new one.")
-            http_session = ClientSession()
-
-        api_url = "https://api.sightengine.com/1.0/check.json"
-        params = {
-            "url": media_url,
-            "models": "nudity-2.0,offensive",
-            "api_user": SIGHTENGINE_API_USER,
-            "api_secret": SIGHTENGINE_API_SECRET,
-        }
-        
-        def log_api_error(message: str, url: str, response_detail: str, level=logging.ERROR):
-            logger.log(level, f"Sightengine API {message} for {url}. Details: {response_detail}")
-
-        try:
-            async with http_session.get(api_url, params=params, timeout=15) as response:
-                response_text = await response.text()  
-
-                if response.status == 200:
-                    try:
-                        data = json.loads(response_text)
-                    except json.JSONDecodeError:
-                        log_api_error("response was not valid JSON", media_url, response_text)
-                        return False
-
-                    if data.get("status") == "success":
-                        nudity_scores = data.get("nudity", {})
-                        sexual_activity_score = nudity_scores.get("sexual_activity", 0.0)
-                        suggestive_score = nudity_scores.get("suggestive", 0.0)
-
-                        offensive_data = data.get("offensive", {})
-                        offensive_prob = 0.0
-                        if offensive_data:
-                            offensive_prob = max(
-                                offensive_data.get("nazi", 0.0),
-                                offensive_data.get("asian_swastika", 0.0),
-                                offensive_data.get("confederate", 0.0),
-                                offensive_data.get("supremacist", 0.0),
-                                offensive_data.get("terrorist", 0.0),
-                                offensive_data.get("middle_finger", 0.0)
-                            )
-                        
-                        logger.debug(f"Sightengine response for {media_url}: "
-                                     f"Nudity Sexual Activity: {sexual_activity_score:.2f}, "
-                                     f"Nudity Suggestive: {suggestive_score:.2f}, "
-                                     f"Offensive (aggregated max): {offensive_prob:.2f}")
-
-                        if (sexual_activity_score > self.sightengine_nsfw_threshold or
-                            suggestive_score > (self.sightengine_nsfw_threshold + 0.2) or
-                            offensive_prob > 0.85): 
-                            logger.info(f"NSFW media detected by Sightengine: {media_url} (Nudity SA: {sexual_activity_score:.2f}, Suggestive: {suggestive_score:.2f}, Offensive: {offensive_prob:.2f})")
-                            return True
-                        return False
-                    else:
-                        error_msg = data.get("error", {}).get("message", "Unknown error in Sightengine response data.")
-                        log_api_error("API error", media_url, f"Status in JSON: {data.get('status')}, Message: {error_msg}, Full JSON: {json.dumps(data)}")
-                        return False
-                elif response.status == 429:
-                    log_api_error("rate limit hit", media_url, f"Status: {response.status}, Response: {response_text}", level=logging.WARNING)
-                    return False
-                else:
-                    log_api_error("API request failed", media_url, f"Status: {response.status}, Response: {response_text}")
-                    return False
-        except client_exceptions.ClientConnectorError as e:
-            log_api_error("network connection error", media_url, f"Error: {e}")
-            return False
-        except asyncio.TimeoutError:
-            log_api_error("request timed out", media_url, "Timeout after 15 seconds", level=logging.WARNING)
-            return False
-        except Exception as e:
-            log_api_error("unexpected error during API call", media_url, f"Error: {e}", level=logging.CRITICAL)
-            return False
-
 cached_guild_configs = defaultdict(dict)
 user_message_history = defaultdict(lambda: defaultdict(lambda: deque(maxlen=5))) 
 user_message_timestamps = defaultdict(lambda: defaultdict(deque)) 
@@ -705,6 +611,7 @@ async def on_guild_join(guild: discord.Guild):
 class Moderation(commands.Cog):
     def __init__(self, bot_instance: commands.Bot):
         self.bot = bot_instance
+        self.sightengine_nsfw_threshold = 0.6
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -899,6 +806,94 @@ class Moderation(commands.Cog):
 
         else: 
             await self.bot.process_commands(message)
+
+    async def check_media_nsfw_sightengine(self, media_url: str) -> bool:
+        """
+        Checks media content for NSFW using the Sightengine API.
+
+        Args:
+            media_url: The URL of the media to check.
+
+        Returns:
+            True if NSFW content is detected, False otherwise.
+        """
+        if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
+            logger.error("Sightengine API credentials not set. Skipping NSFW check for %s", media_url)
+            return False
+            
+        if http_session is None or http_session.closed:
+            logger.warning("http_session was not initialized or was closed. Cannot perform Sightengine check.")
+            return False
+
+        api_url = "https://api.sightengine.com/1.0/check.json"
+        params = {
+            "url": media_url,
+            "models": "nudity-2.0,offensive",
+            "api_user": SIGHTENGINE_API_USER,
+            "api_secret": SIGHTENGINE_API_SECRET,
+        }
+
+        def log_api_error(message: str, url: str, response_detail: str, level=logging.ERROR):
+            logger.log(level, f"Sightengine API {message} for {url}. Details: {response_detail}")
+
+        try:
+            async with http_session.get(api_url, params=params, timeout=15) as response:
+                response_text = await response.text()  
+
+                if response.status == 200:
+                    try:
+                        data = json.loads(response_text)
+                    except json.JSONDecodeError:
+                        log_api_error("response was not valid JSON", media_url, response_text)
+                        return False
+
+                    if data.get("status") == "success":
+                        nudity_scores = data.get("nudity", {})
+                        sexual_activity_score = nudity_scores.get("sexual_activity", 0.0)
+                        suggestive_score = nudity_scores.get("suggestive", 0.0)
+
+                        offensive_data = data.get("offensive", {})
+                        offensive_prob = 0.0
+                        if offensive_data:
+                            offensive_prob = max(
+                                offensive_data.get("nazi", 0.0),
+                                offensive_data.get("asian_swastika", 0.0),
+                                offensive_data.get("confederate", 0.0),
+                                offensive_data.get("supremacist", 0.0),
+                                offensive_data.get("terrorist", 0.0),
+                                offensive_data.get("middle_finger", 0.0)
+                            )
+                        
+                        logger.debug(f"Sightengine response for {media_url}: "
+                                     f"Nudity Sexual Activity: {sexual_activity_score:.2f}, "
+                                     f"Nudity Suggestive: {suggestive_score:.2f}, "
+                                     f"Offensive (aggregated max): {offensive_prob:.2f}")
+
+                        if (sexual_activity_score > self.sightengine_nsfw_threshold or
+                            suggestive_score > (self.sightengine_nsfw_threshold + 0.2) or
+                            offensive_prob > 0.85): 
+                            logger.info(f"NSFW media detected by Sightengine: {media_url} (Nudity SA: {sexual_activity_score:.2f}, Suggestive: {suggestive_score:.2f}, Offensive: {offensive_prob:.2f})")
+                            return True
+                        return False
+                    else:
+                        error_msg = data.get("error", {}).get("message", "Unknown error in Sightengine response data.")
+                        log_api_error("API error", media_url, f"Status in JSON: {data.get('status')}, Message: {error_msg}, Full JSON: {json.dumps(data)}")
+                        return False
+                elif response.status == 429:
+                    log_api_error("rate limit hit", media_url, f"Status: {response.status}, Response: {response_text}", level=logging.WARNING)
+                    return False
+                else:
+                    log_api_error("API request failed", media_url, f"Status: {response.status}, Response: {response_text}")
+                    return False
+        except client_exceptions.ClientConnectorError as e:
+            log_api_error("network connection error", media_url, f"Error: {e}")
+            return False
+        except asyncio.TimeoutError:
+            log_api_error("request timed out", media_url, "Timeout after 15 seconds", level=logging.WARNING)
+            return False
+        except Exception as e:
+            log_api_error("unexpected error during API call", media_url, f"Error: {e}", level=logging.CRITICAL)
+            return False
 
     @commands.command()
     @commands.has_permissions(administrator=True)
