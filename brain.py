@@ -813,7 +813,7 @@ class Moderation(commands.Cog):
             logger.warning("Sightengine API user or secret not configured. Skipping media check.")
             return False
 
-        if not self.bot.http_session: 
+        if not http_session: 
             logger.error("HTTP session not available for Sightengine check.")
             return False
 
@@ -826,7 +826,7 @@ class Moderation(commands.Cog):
         }
 
         try:
-            async with self.bot.http_session.get(api_url, params=params, timeout=15) as response:
+            async with http_session.get(api_url, params=params, timeout=15) as response:
                 if response.status == 200:
                     data = await response.json()
                     # logger.debug(f"Sightengine response for {media_url}: {data}") 
