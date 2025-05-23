@@ -820,9 +820,9 @@ class Moderation(commands.Cog):
         if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
             logger.error("Sightengine API credentials not set. Skipping NSFW check for %s", media_url)
             return False
-            
+
         if http_session is None or http_session.closed:
-            logger.warning("http_session was not initialized or was closed. Cannot perform Sightengine check.")
+            logger.warning("http_session was not initialized or was closed. Cannot perform Sightengine check for %s.", media_url)
             return False
 
         api_url = "https://api.sightengine.com/1.0/check.json"
@@ -877,8 +877,12 @@ class Moderation(commands.Cog):
                         return False
                     else:
                         error_msg = data.get("error", {}).get("message", "Unknown error in Sightengine response data.")
-                        log_api_error("API error", media_url, f"Status in JSON: {data.get('status')}, Message: {error_msg}, Full JSON: {json.dumps(data)}")
-                        return False
+                        if data.get("error", {}).get("code") == 22 and data.get("error", {}).get("type") == "media_error":
+                            log_api_error("API rejected GIF (too many frames - cannot scan)", media_url, error_msg, level=logging.WARNING)
+                            return False 
+                        else:
+                            log_api_error("API error", media_url, f"Status in JSON: {data.get('status')}, Message: {error_msg}, Full JSON: {json.dumps(data)}")
+                            return False
                 elif response.status == 429:
                     log_api_error("rate limit hit", media_url, f"Status: {response.status}, Response: {response_text}", level=logging.WARNING)
                     return False
