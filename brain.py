@@ -5,14 +5,14 @@ import logging
 from collections import deque, defaultdict
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
+import json 
 import aiosqlite
 import discord
 import fasttext
-from aiohttp import ClientSession, web
+from aiohttp import ClientSession, web, client_exceptions 
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-from discord import app_commands 
-import httpx
+from discord import app_commands
 
 load_dotenv()
 
@@ -22,27 +22,29 @@ logger = logging.getLogger('discord_bot')
 DISCORD_TOKEN = os.getenv("ADROIT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 FASTTEXT_MODEL_PATH = os.getenv("FASTTEXT_MODEL_PATH", "lid.176.ftz")
+SIGHTENGINE_API_USER = os.getenv("SIGHTENGINE_API_USER")
+SIGHTENGINE_API_SECRET = os.getenv("SIGHTENGINE_API_SECRET")
 
 if not DISCORD_TOKEN:
     logger.error("ADROIT_TOKEN environment variable not set. Exiting.")
     exit(1)
 
 intents = discord.Intents.default()
-intents.members = True          
-intents.message_content = True  
-intents.presences = False      
+intents.members = True
+intents.message_content = True
+intents.presences = False
 
 bot = commands.Bot(command_prefix=">>", intents=intents, help_command=None)
 
 db_conn: aiosqlite.Connection = None
 LANGUAGE_MODEL = None
-http_session: ClientSession = None 
+http_session: ClientSession = None
 
-cached_guild_configs = defaultdict(dict) 
-user_message_history = defaultdict(lambda: defaultdict(lambda: deque(maxlen=5)))
-user_message_timestamps = defaultdict(lambda: defaultdict(deque))
+cached_guild_configs = defaultdict(dict)
+user_message_history = defaultdict(lambda: defaultdict(lambda: deque(maxlen=5))) 
+user_message_timestamps = defaultdict(lambda: defaultdict(deque)) 
 
-DEFAULT_LOG_CHANNEL_ID = 1113377818424922132
+DEFAULT_LOG_CHANNEL_ID = 1113377818424922132 
 
 DEFAULT_CHANNEL_CONFIGS = {
     1113377809440722974: {"language": ["en"]},
@@ -59,14 +61,16 @@ FORBIDDEN_TEXT_PATTERN = re.compile(
     r"(discord\.gg/|join\s+our|server\s+invite|free\s+nitro|check\s+out\s+my|follow\s+me|subscribe\s+to|buy\s+now)",
     re.IGNORECASE
 )
-URL_PATTERN = re.compile(r"(https?://\S+|www\.\S+|\b\S+\.(com|net|org|io|dev)\b)") 
+URL_PATTERN = re.compile(r"(https?://\S+|www\.\S+|\b\S+\.(com|net|org|io|dev)\b)")
+HAS_ALPHANUMERIC_PATTERN = re.compile(r'[a-zA-Z0-9]')
+
 
 PERMITTED_DOMAINS = [
     "googleusercontent.com", "tenor.com", "giphy.com", "tiktok.com",
     "youtube.com", "youtu.be", "docs.google.com", "cdn.discordapp.com",
     "roblox.com", "github.com", "theuselessweb.com",
-    "wikipedia.com", "twitch.tv", "tiktok.com", "reddit.com", "x.com", "twitter.com"
-]
+    "wikipedia.org", "twitch.tv", "reddit.com", "x.com", "twitter.com"
+] 
 
 PUNISHMENT_SYSTEM = {
     "points_thresholds": {
@@ -74,14 +78,15 @@ PUNISHMENT_SYSTEM = {
         10: {"action": "mute", "duration_hours": 1, "reason": "Spam/Minor violations"},
         15: {"action": "kick", "reason": "Repeated violations"},
         25: {"action": "temp_ban", "duration_days": 1, "reason": "Serious/Persistent violations"},
-        40: {"action": "ban", "reason": "Severe/Accumulated violations"}
+        50: {"action": "temp_ban", "duration_years": 1, "reason": "Severe/Accumulated violations"}
     },
     "violations": {
         "discrimination": {"points": 3, "severity": "Medium"},
         "spam": {"points": 2, "severity": "Medium"},
-        "nsfw": {"points": 5, "severity": "High"},
+        "nsfw": {"points": 5, "severity": "High"}, 
+        "nsfw_media": {"points": 10, "severity": "High"}, 
         "advertising": {"points": 3, "severity": "Medium"},
-        "politics_discussion": {"points": 3, "severity": "Medium"}, 
+        "politics_discussion": {"points": 3, "severity": "Medium"},
         "off_topic": {"points": 1, "severity": "Low"},
         "foreign_language": {"points": 1, "severity": "Low"},
         "openai_moderation": {"points": 3, "severity": "Medium"},
@@ -92,10 +97,17 @@ PUNISHMENT_SYSTEM = {
 }
 
 SPAM_WINDOW = 10  
-SPAM_LIMIT = 5   
+SPAM_LIMIT = 5    
 MENTION_LIMIT = 5
-MAX_MESSAGE_LENGTH = 800
+MAX_MESSAGE_LENGTH = 800 
 MAX_ATTACHMENTS = 4
+
+MIN_MSG_LEN_FOR_LANG_CHECK = 4 
+MIN_CONFIDENCE_FOR_FLAGGING = 0.65
+MIN_CONFIDENCE_SHORT_MSG = 0.75 
+SHORT_MSG_THRESHOLD = 20 
+
+COMMON_SAFE_FOREIGN_WORDS = {"bonjour", "hola", "merci", "gracias", "oui", "si", "nyet", "da", "salut", "ciao", "hallo", "guten tag"}
 
 discrimination_words = set()
 discrimination_patterns = []
@@ -103,7 +115,6 @@ nsfw_words = set()
 nsfw_patterns = []
 
 def load_terms_from_file(filepath: str) -> tuple[set, list]:
-    """Loads terms from a file, separating words and phrases for regex compilation."""
     words = set()
     phrases = []
     try:
@@ -127,11 +138,9 @@ discrimination_words, discrimination_patterns = load_terms_from_file('discrimina
 nsfw_words, nsfw_patterns = load_terms_from_file('nsfw_terms.txt')
 
 def clean_message_content(text: str) -> str:
-    """Clean the message text for analysis."""
     return text.strip().lower()
 
 async def get_guild_config(guild_id: int, key: str, default=None):
-    """Retrieve a guild-specific configuration from cache or DB."""
     if guild_id in cached_guild_configs and key in cached_guild_configs[guild_id]:
         return cached_guild_configs[guild_id][key]
 
@@ -141,16 +150,15 @@ async def get_guild_config(guild_id: int, key: str, default=None):
         if result:
             value = result[0]
             try:
-                if key in ["allowed_languages", "allowed_topics", "permitted_domains"]: 
+                if key in ["allowed_languages", "allowed_topics", "permitted_domains"] and isinstance(value, str):
                     value = json.loads(value)
-            except (json.JSONDecodeError, TypeError):
-                pass
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Failed to parse JSON for guild_config key {key}, guild {guild_id}: {e}. Value: {value}")
             cached_guild_configs[guild_id][key] = value
             return value
     return default
 
 async def set_guild_config(guild_id: int, key: str, value):
-    """Set a guild-specific configuration and update cache."""
     stored_value = value
     if isinstance(value, (list, dict)):
         stored_value = json.dumps(value)
@@ -161,47 +169,68 @@ async def set_guild_config(guild_id: int, key: str, value):
             (guild_id, key, stored_value)
         )
         await db_conn.commit()
-    cached_guild_configs[guild_id][key] = value
+    cached_guild_configs[guild_id][key] = value 
     logger.info(f"Updated guild config: Guild {guild_id}, Key '{key}', Value '{value}'")
 
-async def detect_language_ai(text: str) -> str:
-    """Detect the language of the given text using FastText."""
+async def detect_language_ai(text: str) -> tuple[str, float]:
+    """Detect the language of the given text using FastText. Returns (lang_code, confidence_score)."""
     clean_text = clean_message_content(text)
-    if not LANGUAGE_MODEL:
-        logger.error("FastText model not loaded. Defaulting to 'en'.")
-        return "en"
-    try:
-        prediction = LANGUAGE_MODEL.predict(clean_text)
-        return prediction[0][0].replace("__label__", "")
-    except Exception as e:
-        logger.error(f"FastText language detection error: {e}")
-        return "en" 
+    if not clean_text:
+        return "und", 0.0 
 
-async def log_action(action: str, member: discord.Member, reason: str):
+    if not LANGUAGE_MODEL:
+        logger.error("FastText model not loaded. Defaulting to ('en', 0.0).")
+        return "en", 0.0
+    try:
+        prediction = LANGUAGE_MODEL.predict(clean_text, k=1) 
+        if prediction and prediction[0] and prediction[1]:
+            lang_code = prediction[0][0].replace("__label__", "")
+            confidence = float(prediction[1][0])
+            return lang_code, confidence
+        else:
+            logger.warning(f"FastText returned unexpected prediction format for: '{clean_text[:100]}...'")
+            return "und", 0.0 
+    except Exception as e:
+        logger.error(f"FastText language detection error for '{clean_text[:100]}...': {e}")
+        return "en", 0.0 
+
+async def log_action(action: str, member_or_user: discord.User | discord.Member, reason: str, guild: discord.Guild = None):
     """Log moderation actions to a specified channel and console."""
-    log_channel_id = await get_guild_config(member.guild.id, "log_channel_id", DEFAULT_LOG_CHANNEL_ID)
-    log_channel = bot.get_channel(log_channel_id) or member.guild.get_channel(log_channel_id)
+    current_guild = guild if guild else (member_or_user.guild if isinstance(member_or_user, discord.Member) else None)
+    if not current_guild:
+        logger.error(f"Cannot log action '{action}' for user {member_or_user.id}: Guild context missing.")
+        return
+
+    log_channel_id = await get_guild_config(current_guild.id, "log_channel_id", DEFAULT_LOG_CHANNEL_ID)
+    log_channel = bot.get_channel(log_channel_id) or current_guild.get_channel(log_channel_id)
+
+    user_mention = member_or_user.mention if isinstance(member_or_user, discord.Member) else f"{member_or_user.name}#{member_or_user.discriminator}"
+    user_id = member_or_user.id
+    display_name = member_or_user.display_name if isinstance(member_or_user, discord.Member) else member_or_user.name
+
 
     if log_channel:
         try:
             embed = discord.Embed(
                 title=f"Moderation Action: {action.upper()}",
-                description=f"**User:** {member.mention} (`{member.id}`)\n**Reason:** {reason}\n**Timestamp:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
-                color=discord.Color.red() if action in ["ban", "kick", "mute"] else discord.Color.orange()
+                description=f"**User:** {user_mention} (`{user_id}`)\n**Reason:** {reason}\n**Timestamp:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                color=discord.Color.red() if action in ["ban", "kick", "mute", "temp_ban"] else discord.Color.orange()
             )
             await log_channel.send(embed=embed)
         except discord.Forbidden:
-            logger.error(f"Missing permissions to send logs to channel {log_channel.name} ({log_channel.id}).")
+            logger.error(f"Missing permissions to send logs to channel {log_channel.name} ({log_channel.id}) in guild {current_guild.name}.")
         except Exception as e:
-            logger.error(f"Error sending log embed to channel: {e}")
+            logger.error(f"Error sending log embed to channel for guild {current_guild.name}: {e}")
     else:
-        logger.info(f"LOG: {action.upper()} applied to {member.display_name} ({member.id}) for: {reason}")
-        logger.warning(f"Log channel (ID: {log_channel_id}) not found or accessible for guild {member.guild.name}.")
+        logger.info(f"LOG (Guild {current_guild.name}): {action.upper()} applied to {display_name} ({user_id}) for: {reason}")
+        logger.warning(f"Log channel (ID: {log_channel_id}) not found or accessible for guild {current_guild.name}.")
 
 
 async def check_openai_moderation(text: str) -> dict:
     if not OPENAI_API_KEY:
         logger.warning("OPENAI_API_KEY not set. Skipping OpenAI moderation check.")
+        return {"flagged": False, "categories": {}}
+    if not text.strip(): 
         return {"flagged": False, "categories": {}}
 
     url = "https://api.openai.com/v1/moderations"
@@ -214,74 +243,115 @@ async def check_openai_moderation(text: str) -> dict:
     retries = 3
     for i in range(retries):
         try:
-            async with http_session.post(url, headers=headers, json=data, timeout=5) as response:
+            async with http_session.post(url, headers=headers, json=data, timeout=10) as response:
                 response.raise_for_status()
-                return await response.json().get("results", [{}])[0]
-        except aiohttp.client_exceptions.ClientResponseError as e:
-            if e.status == 429:
-                retry_after = e.headers.get("Retry-After") 
-                wait_time = int(retry_after) if retry_after else (2 ** i) 
-                logger.warning(f"OpenAI moderation API hit rate limit (429). Retrying in {wait_time} seconds...")
-                await asyncio.sleep(wait_time)
-            else:
-                logger.error(f"HTTP error during OpenAI moderation check: {e}")
+                json_response = await response.json()
+                results_list = json_response.get("results", [])
+                if results_list:
+                    return results_list[0]
+                logger.warning(f"OpenAI moderation returned empty results list for text: {text[:100]}")
                 return {"flagged": False, "categories": {}}
+        except client_exceptions.ClientResponseError as e: 
+            if e.status == 429: 
+                retry_after_header = e.headers.get("Retry-After")
+                wait_time = int(retry_after_header) if retry_after_header and retry_after_header.isdigit() else (2 ** (i + 1)) 
+                logger.warning(f"OpenAI moderation API hit rate limit (429). Retrying in {wait_time} seconds... (Attempt {i+1}/{retries})")
+                await asyncio.sleep(wait_time)
+            elif e.status == 400: 
+                 logger.warning(f"OpenAI moderation API returned 400 Bad Request. Text: '{text[:100]}...' Error: {e.message}")
+                 return {"flagged": False, "categories": {}} 
+            else:
+                logger.error(f"HTTP error during OpenAI moderation check: {e.status} - {e.message} for text: {text[:100]}")
+                return {"flagged": False, "categories": {}} 
         except asyncio.TimeoutError:
-            logger.error("OpenAI moderation API request timed out.")
-            return {"flagged": False, "categories": {}}
+            logger.error(f"OpenAI moderation API request timed out after 10 seconds. (Attempt {i+1}/{retries}) Text: {text[:100]}")
+            if i < retries - 1:
+                await asyncio.sleep(2 ** (i + 1)) 
+            else:
+                return {"flagged": False, "categories": {}}
         except Exception as e:
-            logger.error(f"Unexpected error with OpenAI moderation API: {e}")
-            return {"flagged": False, "categories": {}}
-    logger.error(f"Failed to get OpenAI moderation response after {retries} retries.")
+            logger.error(f"Unexpected error with OpenAI moderation API: {e} for text: {text[:100]}", exc_info=True)
+            return {"flagged": False, "categories": {}} 
+    logger.error(f"Failed to get OpenAI moderation response after {retries} retries for text: {text[:100]}")
     return {"flagged": False, "categories": {}}
 
+
 async def apply_punishment(member: discord.Member, action: str, reason: str, duration: timedelta = None):
-    """Apply a punishment to a member based on infraction points."""
     try:
         if action == "warn":
-            warning_message = PUNISHMENT_SYSTEM["points_thresholds"][5]["message"] 
-            await member.send(warning_message)
+            warn_config = PUNISHMENT_SYSTEM["points_thresholds"].get(5, {})
+            warning_message = warn_config.get("message", "You have received a warning. Please be mindful of the server rules.")
+            
+            try:
+                await member.send(f"You have been warned. Reason: {reason}\n{warning_message}")
+            except discord.Forbidden: 
+                logger.warning(f"Could not DM warning to {member.display_name} ({member.id}).")
             await log_action("warn", member, reason)
         elif action == "mute":
             if duration:
                 await member.timeout(duration, reason=reason)
-                await member.send(f"You have been muted for {duration}. Reason: {reason}")
+                try:
+                    await member.send(f"You have been muted for {duration}. Reason: {reason}")
+                except discord.Forbidden:
+                    logger.warning(f"Could not DM mute notification to {member.display_name} ({member.id}).")
                 await log_action("mute", member, reason)
             else:
                 logger.warning(f"Attempted to mute {member.display_name} without duration. Skipping.")
         elif action == "kick":
+            try:
+                await member.send(f"You are being kicked from the server. Reason: {reason}")
+            except discord.Forbidden:
+                 logger.warning(f"Could not DM kick notification to {member.display_name} ({member.id}).")
             await member.kick(reason=reason)
-            await log_action("kick", member, reason)
+            await log_action("kick", member, reason) 
         elif action == "temp_ban":
             if duration:
                 unban_time = datetime.utcnow() + duration
                 async with db_conn.cursor() as cursor:
                     await cursor.execute(
-                        'INSERT INTO temp_bans (user_id, guild_id, unban_time, ban_reason) VALUES (?, ?, ?, ?)',
+                        'INSERT OR REPLACE INTO temp_bans (user_id, guild_id, unban_time, ban_reason) VALUES (?, ?, ?, ?)',
                         (member.id, member.guild.id, unban_time.isoformat(), reason)
                     )
                     await db_conn.commit()
-                await member.ban(reason=reason, delete_message_days=0) 
-                await member.send(f"You have been temporarily banned until {unban_time.isoformat()} UTC. Reason: {reason}")
+                try:
+                    await member.send(f"You have been temporarily banned until {unban_time.strftime('%Y-%m-%d %H:%M:%S UTC')}. Reason: {reason}")
+                except discord.Forbidden:
+                    logger.warning(f"Could not DM temp_ban notification to {member.display_name} ({member.id}).")
+                await member.ban(reason=reason, delete_message_days=0)
                 await log_action("temp_ban", member, reason)
             else:
                 logger.warning(f"Attempted to temp_ban {member.display_name} without duration. Skipping.")
         elif action == "ban":
-            await member.ban(reason=reason, delete_message_days=0) 
-            await member.send(f"You have been permanently banned. Reason: {reason}")
+            try:
+                await member.send(f"You have been permanently banned from the server. Reason: {reason}")
+            except discord.Forbidden:
+                 logger.warning(f"Could not DM ban notification to {member.display_name} ({member.id}).")
+            await member.ban(reason=reason, delete_message_days=0)
             await log_action("ban", member, reason)
     except discord.Forbidden:
         logger.error(f"Missing permissions to {action} {member.display_name} in {member.guild.name}. "
-                     f"Please check bot permissions.")
+                     f"Please check bot role hierarchy and permissions.")
     except discord.HTTPException as e:
-        logger.error(f"Discord API error while applying {action} to {member.display_name}: {e}")
+        logger.error(f"Discord API error while applying {action} to {member.display_name}: {e.status} - {e.text}")
     except Exception as e:
         logger.error(f"Unexpected error applying {action} to {member.display_name}: {e}", exc_info=True)
 
+
 async def log_violation(member: discord.Member, violation_type: str, message: discord.Message):
-    """Log a violation, add points, and apply punishment if thresholds are met."""
-    points = PUNISHMENT_SYSTEM["violations"].get(violation_type, {"points": 0})["points"]
-    reason = f"Violation: {violation_type} in message: '{message.content[:100]}...'"
+    points_config = PUNISHMENT_SYSTEM["violations"].get(violation_type)
+    if not points_config:
+        logger.warning(f"Unknown violation type '{violation_type}' encountered for user {member.id}. No points assigned.")
+        return
+    
+    points = points_config["points"]
+    message_summary = message.content[:75] + '...' if len(message.content) > 75 else message.content
+    reason_details = f"{violation_type.replace('_', ' ').title()}"
+    if message.content:
+        reason_details += f" (message: '{message_summary}')"
+    else:
+        reason_details += f" (message ID: {message.id})"
+
+
     guild_id = member.guild.id
     user_id = member.id
 
@@ -294,133 +364,181 @@ async def log_violation(member: discord.Member, violation_type: str, message: di
 
         cutoff_date = (datetime.utcnow() - timedelta(days=30)).isoformat()
         await cursor.execute(
-            'SELECT SUM(points) FROM infractions WHERE user_id = ? AND guild_id = ? AND timestamp > ?',
+            'SELECT SUM(points) FROM infractions WHERE user_id = ? AND guild_id = ? AND timestamp >= ?', 
             (user_id, guild_id, cutoff_date)
         )
-        total_points = (await cursor.fetchone())[0] or 0
+        total_points_data = await cursor.fetchone()
+        total_points = total_points_data[0] if total_points_data and total_points_data[0] is not None else 0
 
-    logger.info(f"User {member.display_name} ({user_id}) accumulated {points} points for '{violation_type}'. "
-                f"Total points (for a month): {total_points}")
+
+    logger.info(f"User {member.display_name} ({user_id}) in guild {guild_id} received {points} points for '{violation_type}'. "
+                f"Total active points (last 30 days): {total_points}.")
 
     for threshold_points in sorted(PUNISHMENT_SYSTEM["points_thresholds"].keys(), reverse=True):
         if total_points >= threshold_points:
+
             punishment_config = PUNISHMENT_SYSTEM["points_thresholds"][threshold_points]
             action = punishment_config["action"]
+            
+            auto_punishment_reason = punishment_config.get(
+                "reason", 
+                f"Automated action: Accumulated {total_points} infraction points."
+            )
+            if f"Accumulated {total_points} infraction points" not in auto_punishment_reason:
+                 auto_punishment_reason = f"{auto_punishment_reason} (Triggered by {total_points} points)."
+
+
             duration = None
             if "duration_hours" in punishment_config:
                 duration = timedelta(hours=punishment_config["duration_hours"])
             elif "duration_days" in punishment_config:
                 duration = timedelta(days=punishment_config["duration_days"])
-
-            punishment_reason = punishment_config.get("reason", f"Accumulated {total_points} infraction points.")
-            await apply_punishment(member, action, punishment_reason, duration)
+            elif "duration_years" in punishment_config:
+                duration = timedelta(years=punishment_config["duration_years"])
+            
+            logger.info(f"Applying punishment '{action}' to {member.display_name} due to reaching {total_points} points (threshold: {threshold_points}).")
+            await apply_punishment(member, action, auto_punishment_reason, duration)
             break 
 
-def get_domain_from_url(url: str) -> str:
-    """Extract the domain from a URL, handling common prefixes."""
-    if not url.startswith(('http://', 'https://')):
-        url = 'http://' + url 
-    parsed = urlparse(url)
-    domain = parsed.netloc
-    if domain.startswith('www.'):
-        domain = domain[4:]
-    return domain.lower()
 
-def is_permitted_domain(domain: str) -> bool:
-    """Check if the extracted domain is in the permitted list or is a subdomain of a permitted domain."""
-    for perm_domain in PERMITTED_DOMAINS:
-        perm_domain_cleaned = get_domain_from_url(perm_domain) 
-        if domain == perm_domain_cleaned or domain.endswith('.' + perm_domain_cleaned):
-            return True
+def get_domain_from_url(url: str) -> str | None:
+    try:
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url 
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        return domain.lower() if domain else None
+    except Exception as e:
+        logger.debug(f"Could not parse domain from URL '{url}': {e}")
+        return None
+
+def is_permitted_domain(domain: str, guild_permitted_domains: list[str]) -> bool:
+    """Check if the extracted domain is in the guild's permitted list or is a subdomain."""
+    if not domain:
+        return False
+    for perm_domain_raw in guild_permitted_domains:
+        perm_domain_cleaned = get_domain_from_url(perm_domain_raw)
+        if perm_domain_cleaned:
+            if domain == perm_domain_cleaned or domain.endswith('.' + perm_domain_cleaned):
+                return True
     return False
 
+
 async def handle_health_check(request):
-    """Handle HTTP requests for health checks."""
     return web.Response(text="Bot is awake and healthy!", status=200, headers={"Content-Type": "text/plain"})
 
 async def start_http_server():
-    """Start an HTTP server to keep the bot running (e.g., on Heroku)."""
     try:
         app = web.Application()
         app.router.add_get('/', handle_health_check)
         runner = web.AppRunner(app)
         await runner.setup()
-        port = int(os.getenv("PORT", "8080"))
+        port = int(os.getenv("PORT", "8080")) 
         site = web.TCPSite(runner, host='0.0.0.0', port=port)
         await site.start()
-        logger.info(f"✅ HTTP server running on port {port}")
+        logger.info(f"✅ HTTP server running on http://0.0.0.0:{port}")
     except Exception as e:
         logger.error(f"❌ Failed to start HTTP server: {e}", exc_info=True)
 
 
 @tasks.loop(hours=24)
 async def decay_points():
-    """Remove infraction records older than 90 days and clean up temp_bans."""
     if not db_conn:
         logger.warning("Database connection not available for decay_points task. Skipping.")
         return
 
     async with db_conn.cursor() as cursor:
-        cutoff_date_infractions = (datetime.utcnow() - timedelta(days=90)).isoformat()
-        await cursor.execute('DELETE FROM infractions WHERE timestamp < ?', (cutoff_date_infractions,))
-        logger.info(f"Deleted infraction records older than 90 days.")
+        cutoff_date_infractions_deletion = (datetime.utcnow() - timedelta(days=90)).isoformat()
+        await cursor.execute('DELETE FROM infractions WHERE timestamp < ?', (cutoff_date_infractions_deletion,))
+        deleted_rows = cursor.rowcount
+        if deleted_rows > 0:
+            logger.info(f"Deleted {deleted_rows} infraction records older than 90 days.")
+        else:
+            logger.info("No infraction records older than 90 days to delete.")
 
         now_iso = datetime.utcnow().isoformat()
-        await cursor.execute('SELECT user_id, guild_id FROM temp_bans WHERE unban_time <= ?', (now_iso,))
+        await cursor.execute('SELECT user_id, guild_id, ban_reason FROM temp_bans WHERE unban_time <= ?', (now_iso,))
         expired_bans = await cursor.fetchall()
 
-        for user_id, guild_id in expired_bans:
+        for user_id, guild_id, ban_reason in expired_bans:
             guild = bot.get_guild(guild_id)
             if guild:
                 try:
-                    user = await bot.fetch_user(user_id) 
-                    if user:
-                        await guild.unban(user, reason="Temporary ban expired.")
-                        logger.info(f"Unbanned user {user.name} ({user_id}) from guild {guild.name} ({guild_id}) - temp ban expired.")
-                        await log_action("unban", user, "Temporary ban expired automatically.")
-                except discord.NotFound:
-                    logger.warning(f"Could not find user {user_id} for unban in guild {guild_id}.")
+                    user_to_unban = discord.Object(id=user_id)
+                    await guild.unban(user_to_unban, reason="Temporary ban expired automatically.")
+                    logger.info(f"Unbanned user ID {user_id} from guild {guild.name} ({guild_id}) - temp ban expired.")
+                    
+                    try:
+                        user_obj = await bot.fetch_user(user_id)
+                        await log_action("unban", user_obj, f"Temporary ban expired (original reason: {ban_reason})", guild=guild)
+                    except discord.NotFound:
+                        await log_action("unban_id", discord.Object(id=user_id) , f"User ID {user_id} unbanned. Temp ban expired (original reason: {ban_reason})", guild=guild)
+
+                except discord.NotFound: 
+                    logger.warning(f"User {user_id} not found in ban list of guild {guild.name} for automatic unban, or already unbanned.")
                 except discord.Forbidden:
                     logger.error(f"Missing permissions to unban user {user_id} in guild {guild.name}.")
                 except Exception as e:
-                    logger.error(f"Error during unban process for user {user_id} in guild {guild_id}: {e}", exc_info=True)
+                    logger.error(f"Error during automatic unban process for user {user_id} in guild {guild.name}: {e}", exc_info=True)
+            else:
+                 logger.warning(f"Cannot process temp ban expiry for user {user_id} in guild {guild_id}: Bot is not in this guild.")
 
-            await cursor.execute('DELETE FROM temp_bans WHERE user_id = ? AND guild_id = ?', (user_id, guild_id))
-        await db_conn.commit()
-    logger.info("Decay points and temporary bans cleanup completed.")
+            await cursor.execute('DELETE FROM temp_bans WHERE user_id = ? AND guild_id = ? AND unban_time <= ?', (user_id, guild_id, now_iso))
+        if expired_bans:
+             await db_conn.commit()
+    logger.info("Decay points and temporary bans cleanup task completed.")
 
 
-@tasks.loop(hours=12) 
+@tasks.loop(hours=12)
 async def cleanup_message_tracking():
-    """Clean up message count and history tracking for inactive users."""
     now = datetime.utcnow()
+    cleaned_users_timestamps = 0
+    cleaned_guilds_timestamps = 0
     for guild_id in list(user_message_timestamps.keys()):
         for user_id in list(user_message_timestamps[guild_id].keys()):
             user_message_timestamps[guild_id][user_id] = deque(
                 t for t in user_message_timestamps[guild_id][user_id]
-                if (now - t).total_seconds() < SPAM_WINDOW 
+                if (now - t).total_seconds() < (SPAM_WINDOW + 60) 
             )
             if not user_message_timestamps[guild_id][user_id]:
                 del user_message_timestamps[guild_id][user_id]
+                cleaned_users_timestamps +=1
         if not user_message_timestamps[guild_id]:
             del user_message_timestamps[guild_id]
+            cleaned_guilds_timestamps +=1
+    
+    if cleaned_users_timestamps > 0 or cleaned_guilds_timestamps > 0:
+        logger.info(f"Cleaned up message timestamps for {cleaned_users_timestamps} users across {cleaned_guilds_timestamps} guilds.")
 
+    cleaned_users_history = 0
+    cleaned_guilds_history = 0
+    long_ago = now - timedelta(days=7) 
     for guild_id in list(user_message_history.keys()):
         for user_id in list(user_message_history[guild_id].keys()):
-            if user_message_history[guild_id][user_id] and \
-               (now - user_message_history[guild_id][user_id][-1][0]).total_seconds() > timedelta(days=7).total_seconds():
-                user_message_history[guild_id][user_id].clear()
-            if not user_message_history[guild_id][user_id]:
-                del user_message_history[guild_id][user_id]
-        if not user_message_history[guild_id]:
+            if user_message_history[guild_id][user_id]:
+                if user_message_history[guild_id][user_id][-1][0] < long_ago:
+                    del user_message_history[guild_id][user_id] 
+                    cleaned_users_history+=1
+            elif not user_message_history[guild_id][user_id]: 
+                 del user_message_history[guild_id][user_id]
+                 cleaned_users_history+=1
+
+        if not user_message_history[guild_id]: 
             del user_message_history[guild_id]
-    logger.info("Message tracking cleanup completed.")
+            cleaned_guilds_history+=1
+            
+    if cleaned_users_history > 0 or cleaned_guilds_history > 0:
+        logger.info(f"Cleaned up message history for {cleaned_users_history} users across {cleaned_guilds_history} guilds.")
+    if not (cleaned_users_timestamps or cleaned_guilds_timestamps or cleaned_users_history or cleaned_guilds_history):
+        logger.info("Message tracking cleanup: No old data found to clean.")
 
 
 @bot.event
 async def on_ready():
-    """Handle bot startup tasks."""
     logger.info(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
+    logger.info(f"Discord.py version: {discord.__version__}")
     logger.info("------")
 
     global http_session
@@ -429,57 +547,66 @@ async def on_ready():
     global db_conn
     try:
         db_conn = await aiosqlite.connect('infractions.db')
-        await init_db()
-        logger.info("✅ Database initialized.")
+        await init_db() 
+        logger.info("✅ Database initialized and connection established.")
     except Exception as e:
-        logger.critical(f"❌ Failed to connect to or initialize database: {e}", exc_info=True)
+        logger.critical(f"❌ CRITICAL: Failed to connect to or initialize database: {e}", exc_info=True)
+        exit(1) # I see no point in keeping bot online if it can't even access it's own databases
 
     global LANGUAGE_MODEL
-    try:
-        LANGUAGE_MODEL = fasttext.load_model(FASTTEXT_MODEL_PATH)
-        logger.info(f"✅ Successfully loaded FastText model from {FASTTEXT_MODEL_PATH}")
-    except Exception as e:
-        logger.error(f"❌ Failed to load FastText model from {FASTTEXT_MODEL_PATH}: {e}. Language detection may not work.", exc_info=True)
+    if FASTTEXT_MODEL_PATH:
+        try:
+            LANGUAGE_MODEL = fasttext.load_model(FASTTEXT_MODEL_PATH)
+            logger.info(f"✅ Successfully loaded FastText model from {FASTTEXT_MODEL_PATH}")
+        except ValueError as ve: 
+            logger.error(f"❌ Failed to load FastText model: {ve}. Is '{FASTTEXT_MODEL_PATH}' a valid model file?", exc_info=True)
+        except Exception as e:
+            logger.error(f"❌ Failed to load FastText model from {FASTTEXT_MODEL_PATH}: {e}. Language detection will be impaired.", exc_info=True)
+    else:
+        logger.warning("FASTTEXT_MODEL_PATH not set. Language detection will be disabled.")
 
-    decay_points.start()
-    cleanup_message_tracking.start()
-    await start_http_server()
+
+    if db_conn: 
+        decay_points.start()
+        cleanup_message_tracking.start()
+    
+    await start_http_server() 
+
     try:
         synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} command(s).")
+        logger.info(f"Synced {len(synced)} application command(s).")
     except Exception as e:
-        logger.error(f"Failed to sync commands: {e}", exc_info=True)
+        logger.error(f"Failed to sync application commands: {e}", exc_info=True)
 
 @bot.event
 async def on_error(event_name, *args, **kwargs):
-    """General error handler for bot events."""
-    logger.error(f"Unhandled error in event '{event_name}':", exc_info=True)
+    logger.error(f"Unhandled error in event '{event_name}': Args: {args}, Kwargs: {kwargs}", exc_info=True)
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
-    """Error handler for command invocations."""
-    if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"Missing argument: {error.param}. Please check the command usage.")
+    if isinstance(error, commands.CommandNotFound):
+        return 
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"Oops! You missed an argument: `{error.param.name}`. Check `>>help {ctx.command.qualified_name}` for usage.")
     elif isinstance(error, commands.BadArgument):
-        await ctx.send(f"Bad argument: {error}. Please provide a valid value.")
-    elif isinstance(error, commands.CommandNotFound):
-        pass
-    elif isinstance(error, commands.MissingPermissions):
-        await ctx.send("You don't have the necessary permissions to use this command.")
-    elif isinstance(error, commands.BotMissingPermissions):
-        await ctx.send(f"I don't have the necessary permissions to perform this action. I need: {', '.join(error.missing_permissions)}")
-        logger.warning(f"Bot missing permissions in guild {ctx.guild.id}, channel {ctx.channel.id}: {error.missing_permissions}")
+        await ctx.send(f"Hmm, that's not a valid argument. {error}")
     elif isinstance(error, commands.NoPrivateMessage):
-        await ctx.send("This command cannot be used in private messages.")
+        await ctx.send("This command can only be used in a server.")
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send(f"You don't have the required permissions to use this command: `{', '.join(error.missing_permissions)}`")
+    elif isinstance(error, commands.BotMissingPermissions):
+        await ctx.send(f"I'm missing permissions to do that: `{', '.join(error.missing_permissions)}`. Please grant them to me!")
+        logger.warning(f"Bot missing permissions in guild {ctx.guild.id}, channel {ctx.channel.id}: {error.missing_permissions} for command {ctx.command.name}")
+    elif isinstance(error, commands.CommandInvokeError):
+        logger.error(f"Error invoking command '{ctx.command.qualified_name}': {error.original}", exc_info=error.original)
+        await ctx.send("An internal error occurred while running this command. The developers have been notified.")
     else:
-        logger.error(f"Unhandled command error in {ctx.command}: {error}", exc_info=True)
-        await ctx.send("An unexpected error occurred while processing your command.")
+        logger.error(f"Unhandled command error for '{ctx.command.qualified_name if ctx.command else 'UnknownCmd'}': {error}", exc_info=True)
+        await ctx.send("An unexpected error occurred. Please try again later.")
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    """Log when the bot joins a new guild."""
-    logger.info(f"Joined guild: {guild.name} ({guild.id})")
-
+    logger.info(f"Joined new guild: {guild.name} (ID: {guild.id}, Members: {guild.member_count})")
 
 class Moderation(commands.Cog):
     def __init__(self, bot_instance: commands.Bot):
@@ -487,177 +614,362 @@ class Moderation(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Handle incoming messages and apply moderation rules."""
-        if message.author.bot or not message.guild:
+        if message.author.bot or not message.guild or not db_conn:
             return
+
+        if isinstance(bot.command_prefix, str) and message.content.startswith(bot.command_prefix):
+             pass 
 
         violations = set()
         guild_id = message.guild.id
         user_id = message.author.id
-        content_lower = message.content.lower()
+        content_raw = message.content # Keep raw for OpenAI
+        content_lower = clean_message_content(content_raw) 
         now = datetime.utcnow()
 
-        channel_config_db = await get_guild_config(guild_id, f"channel_config_{message.channel.id}", {})
-        channel_cfg = DEFAULT_CHANNEL_CONFIGS.get(message.channel.id, {})
-        channel_cfg.update(channel_config_db) 
+        channel_specific_db_config = await get_guild_config(guild_id, f"channel_config_{message.channel.id}", {})
+        # guild_wide_lang = await get_guild_config(guild_id, "allowed_languages", None) 
 
-        user_message_timestamps[guild_id][user_id].append(now)
-        while user_message_timestamps[guild_id][user_id] and \
-              (now - user_message_timestamps[guild_id][user_id][0]).total_seconds() >= SPAM_WINDOW:
-            user_message_timestamps[guild_id][user_id].popleft()
+        channel_cfg = DEFAULT_CHANNEL_CONFIGS.get(message.channel.id, {}).copy() 
+        if isinstance(channel_specific_db_config, dict): 
+            channel_cfg.update(channel_specific_db_config)
+        else: 
+            logger.warning(f"channel_config_{message.channel.id} for guild {guild_id} was not a dict: {channel_specific_db_config}")
+        
+        guild_permitted_domains = await get_guild_config(guild_id, "permitted_domains", list(PERMITTED_DOMAINS))
 
-        if len(user_message_timestamps[guild_id][user_id]) > SPAM_LIMIT:
+
+        user_timestamps = user_message_timestamps[guild_id][user_id]
+        user_timestamps.append(now)
+        while user_timestamps and (now - user_timestamps[0]).total_seconds() >= SPAM_WINDOW:
+            user_timestamps.popleft()
+        if len(user_timestamps) > SPAM_LIMIT:
             violations.add("spam")
+            logger.debug(f"Spam (frequency) by {message.author.name}: {len(user_timestamps)} msgs in {SPAM_WINDOW}s")
 
-        user_message_history[guild_id][user_id].append((now, message.content))
-        if message.content in [msg_content for _, msg_content in list(user_message_history[guild_id][user_id])[:-1]]:
+        user_hist = user_message_history[guild_id][user_id]
+        if content_raw and content_raw in [msg_content for _, msg_content in list(user_hist)]:
             violations.add("spam")
+            logger.debug(f"Spam (repetition) by {message.author.name}: '{content_raw[:50]}...'")
+        user_hist.append((now, content_raw))
+
 
         if len(message.mentions) > MENTION_LIMIT:
             violations.add("excessive_mentions")
         if len(message.attachments) > MAX_ATTACHMENTS:
             violations.add("excessive_attachments")
-        if len(message.content) > MAX_MESSAGE_LENGTH:
+        if len(content_raw) > MAX_MESSAGE_LENGTH: 
             violations.add("long_message")
 
-        allowed_languages = channel_cfg.get("language")
-        if allowed_languages:
-            detected_lang = await detect_language_ai(message.content)
-            if detected_lang not in allowed_languages:
-                violations.add("foreign_language")
-                logger.debug(f"Foreign language detected for {message.author.name} in {message.channel.name}: {detected_lang}")
+        allowed_languages = channel_cfg.get("language") 
+        if allowed_languages and content_lower: 
+            skip_lang_check_reason = None
+            if URL_PATTERN.fullmatch(content_lower):
+                skip_lang_check_reason = "message is a URL"
+            elif not HAS_ALPHANUMERIC_PATTERN.search(content_lower): 
+                skip_lang_check_reason = "message has no alphanumeric characters"
+            elif len(content_lower) <= MIN_MSG_LEN_FOR_LANG_CHECK: 
+                skip_lang_check_reason = f"message is too short ({len(content_lower)} chars)"
+            
+            if skip_lang_check_reason:
+                logger.debug(f"Skipping language check for '{content_raw[:50]}...': {skip_lang_check_reason}.")
+            else:
+                detected_lang_code, confidence = await detect_language_ai(content_raw) # Use raw for detection
+                logger.debug(f"Language detection for '{content_raw[:50]}...': Lang={detected_lang_code}, Conf={confidence:.2f}")
 
-        link_channel_id = await get_guild_config(guild_id, "link_channel_id")
+                if detected_lang_code not in allowed_languages:
+                    if detected_lang_code == "und":
+                        logger.info(f"Language undetermined for '{content_raw[:50]}...'. Not flagging as foreign language.")
+                    elif content_lower in COMMON_SAFE_FOREIGN_WORDS:
+                        logger.info(f"Message '{content_lower}' is a common safe word, detected as {detected_lang_code}. Not flagging as foreign language unless confidence is very high.")
+                    elif len(content_lower) < SHORT_MSG_THRESHOLD and confidence < MIN_CONFIDENCE_SHORT_MSG:
+                        logger.info(f"Low confidence ({confidence:.2f} < {MIN_CONFIDENCE_SHORT_MSG}) for short message '{content_raw[:50]}...' (lang: {detected_lang_code}). Not flagging as foreign.")
+                    elif confidence < MIN_CONFIDENCE_FOR_FLAGGING:
+                         logger.info(f"Low confidence ({confidence:.2f} < {MIN_CONFIDENCE_FOR_FLAGGING}) for message '{content_raw[:50]}...' (lang: {detected_lang_code}). Not flagging as foreign.")
+                    else:
+                        violations.add("foreign_language")
+                        logger.debug(f"Foreign language violation by {message.author.name} in {message.channel.name}: '{detected_lang_code}' (Conf: {confidence:.2f}) not in {allowed_languages}. Message: '{content_raw[:50]}...'")
+        
+        link_channel_id_config = await get_guild_config(guild_id, "link_channel_id") 
+        link_channel_id = int(link_channel_id_config) if link_channel_id_config and str(link_channel_id_config).isdigit() else None
+
 
         if FORBIDDEN_TEXT_PATTERN.search(content_lower):
             violations.add("advertising")
+            logger.debug(f"Advertising (forbidden pattern) by {message.author.name}: '{content_raw[:50]}...'")
 
-        urls = URL_PATTERN.findall(message.content)
-        if urls and message.channel.id != link_channel_id:
-            for url_match in urls:
-                url = url_match[0] if isinstance(url_match, tuple) else url_match
-                domain = get_domain_from_url(url)
-                if domain and not is_permitted_domain(domain):
-                    violations.add("advertising")
-                    logger.debug(f"Forbidden URL detected: {url} (Domain: {domain})")
-                    break 
+        urls_found = URL_PATTERN.findall(content_raw)
+        if urls_found:
+            is_link_channel = (link_channel_id == message.channel.id)
+            if not is_link_channel:
+                for url_match in urls_found:
+                    url_str = url_match[0] if isinstance(url_match, tuple) else url_match
+                    domain = get_domain_from_url(url_str)
+                    if domain and not is_permitted_domain(domain, guild_permitted_domains):
+                        violations.add("advertising")
+                        logger.debug(f"Advertising (forbidden domain: {domain}) by {message.author.name} in non-link channel. URL: {url_str}")
+                        break
+                    elif not domain:
+                        logger.debug(f"Could not extract domain from URL '{url_str}' for advertising check.")
+
 
         words_in_message = set(re.findall(r'\b\w+\b', content_lower))
         if any(word in discrimination_words for word in words_in_message) or \
            any(pattern.search(content_lower) for pattern in discrimination_patterns):
             violations.add("discrimination")
+            logger.debug(f"Discrimination (local list) by {message.author.name}: '{content_raw[:50]}...'")
+
 
         if any(word in nsfw_words for word in words_in_message) or \
            any(pattern.search(content_lower) for pattern in nsfw_patterns):
             violations.add("nsfw")
+            logger.debug(f"NSFW (local list) by {message.author.name}: '{content_raw[:50]}...'")
 
-        allowed_topics = channel_cfg.get("topics")
-        if allowed_topics:
+        allowed_topics = channel_cfg.get("topics") 
+        if allowed_topics: 
             if not any(topic.lower() in content_lower for topic in allowed_topics):
                 violations.add("off_topic")
+                logger.debug(f"Off-topic by {message.author.name}: '{content_raw[:50]}...' (Allowed: {allowed_topics})")
         else: 
-            general_sensitive_terms = ["politics", "religion", "god", "allah", "jesus", "church", "mosque",
-                                       "temple", "bible", "quran", "torah", "democrat", "republican", "liberal", "conservative"]
-            if any(term in content_lower for term in general_sensitive_terms):
-                violations.add("politics_discussion")
+            general_sensitive_terms = [
+                "politics", "religion", 
+                "democrat", "republican", "liberal", "conservative" 
+            ]
+            # if any(term in content_lower for term in general_sensitive_terms):
+            # violations.add("politics_discussion") # Or a more generic "sensitive_topic"
+            # logger.debug(f"Sensitive topic (politics/religion) by {message.author.name}: '{content_raw[:50]}...'")
+            pass 
 
-        if not violations and OPENAI_API_KEY:
-            moderation_result = await check_openai_moderation(message.content)
+
+        if message.attachments and not ("nsfw" in violations):
+            for attachment in message.attachments:
+                content_type = attachment.content_type
+                if content_type and (content_type.startswith('image/') or content_type.startswith('video/')):
+                    if SIGHTENGINE_API_USER and SIGHTENGINE_API_SECRET:
+                        logger.info(f"Checking attachment '{attachment.filename}' ({content_type}) with Sightengine...")
+                        try:
+                            is_media_nsfw = await self.check_media_nsfw_sightengine(attachment.url)
+                            if is_media_nsfw:
+                                violations.add("nsfw_media")
+                                logger.info(f"NSFW media (Sightengine) violation: {attachment.url} by {message.author.name}")
+                                break 
+                        except Exception as e:
+                            logger.error(f"Error calling Sightengine NSFW check for {attachment.url}: {e}", exc_info=True)
+                    else:
+                        logger.debug("Sightengine API credentials not set. Skipping media NSFW check.")
+
+        run_openai_check = OPENAI_API_KEY and content_raw.strip() and not any(v in violations for v in ["nsfw", "discrimination"])
+
+        if run_openai_check:
+            moderation_result = await check_openai_moderation(content_raw)
             if moderation_result.get("flagged", False):
-                violations.add("openai_moderation")
-                for category, flagged in moderation_result.get("categories", {}).items():
-                    if flagged:
-                        logger.debug(f"OpenAI flagged category: {category}")
-                        if category in ["hate", "hate/threatening", "self-harm", "sexual", "sexual/minors", "violence", "violence/graphic"]:
-                            violations.add("nsfw" if category.startswith("sexual") else "discrimination")
+                violations.add("openai_moderation") 
+                logger.debug(f"OpenAI flagged message by {message.author.name}: '{content_raw[:50]}...'. Categories: {moderation_result.get('categories')}")
+                categories = moderation_result.get("categories", {})
+                if categories.get("hate", False) or categories.get("hate/threatening", False):
+                    violations.add("discrimination")
+                if categories.get("sexual", False) or categories.get("sexual/minors", False):
+                    violations.add("nsfw")
+                if categories.get("self-harm", False):
+                    violations.add("nsfw") 
 
         if violations:
-            logger.info(f"Message from {message.author.name} ({user_id}) in {message.channel.name} ({message.channel.id}) "
-                        f"flagged with violations: {', '.join(violations)}")
+            logger.info(f"Message from {message.author.name} ({user_id}) in #{message.channel.name} ({message.channel.id}) "
+                        f"flagged with violations: {', '.join(sorted(list(violations)))}. Content: '{content_raw[:100]}...'")
             try:
                 await message.delete()
-                await log_action("message_deleted", message.author, f"Violations: {', '.join(violations)}")
+                await log_action("message_deleted", message.author, f"Violations: {', '.join(sorted(list(violations)))}", guild=message.guild)
+
             except discord.Forbidden:
-                logger.error(f"Missing permissions to delete message by {message.author.name} in {message.channel.name}.")
+                logger.error(f"Missing permissions to delete message by {message.author.name} in #{message.channel.name}.")
+            except discord.NotFound: 
+                logger.warning(f"Message {message.id} by {message.author.name} was already deleted.")
             except discord.HTTPException as e:
-                logger.error(f"Error deleting message: {e}")
-            except Exception as e:
-                logger.error(f"Unexpected error during message deletion: {e}", exc_info=True)
+                logger.error(f"HTTP error deleting message {message.id}: {e.status} - {e.text}")
+            except Exception as e: 
+                logger.error(f"Unexpected error during message deletion of {message.id}: {e}", exc_info=True)
 
-            for violation in violations:
-                await log_violation(message.author, violation, message)
 
-            warning_msg = f"{message.author.mention}, your message has been deleted due to: **{', '.join(v.replace('_', ' ').title() for v in violations)}**. Please review the server rules."
+            for violation in sorted(list(violations)): 
+                await log_violation(message.author, violation, message) 
+
+            violation_titles = sorted([v.replace('_', ' ').title() for v in violations])
+            warning_msg_text = (f"{message.author.mention}, your message was removed due to: "
+                                f"**{', '.join(violation_titles)}**. Please review server rules.")
             try:
-                await message.channel.send(warning_msg, delete_after=15)
+                await message.channel.send(warning_msg_text, delete_after=20) 
             except discord.Forbidden:
-                logger.error(f"Missing permissions to send warning message in {message.channel.name}.")
+                logger.error(f"Missing permissions to send warning message in #{message.channel.name}.")
+            except discord.HTTPException as e:
+                 logger.error(f"HTTP error sending warning message: {e.status} - {e.text}")
+
+        else: 
+            await self.bot.process_commands(message)
 
 
-        await self.bot.process_commands(message)
+    async def check_media_nsfw_sightengine(self, media_url: str) -> bool:
+        """Checks if media URL is NSFW using Sightengine API. Returns True if NSFW, False otherwise."""
+        if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
+            logger.warning("Sightengine API user or secret not configured. Skipping media check.")
+            return False
+
+        if not self.bot.http_session: 
+            logger.error("HTTP session not available for Sightengine check.")
+            return False
+
+        api_url = "https://api.sightengine.com/1.0/check.json"
+        params = {
+            "url": media_url,
+            "models": "nudity-2.0,offensive", 
+            "api_user": SIGHTENGINE_API_USER,
+            "api_secret": SIGHTENGINE_API_SECRET,
+        }
+
+        try:
+            async with self.bot.http_session.get(api_url, params=params, timeout=15) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # logger.debug(f"Sightengine response for {media_url}: {data}") 
+                    
+                    if data.get("status") == "success":
+                        nudity_score = data.get("nudity", {}).get("sexual_activity", 0.99)
+                        suggestive_score = data.get("nudity", {}).get("suggestive", 0.8) 
+                        data.get("nudity", {}).get("erotica", 0.7)
+                        data.get("nudity", {}).get("sextoy", 0.5)
+
+                        offensive_prob = data.get("offensive", {}).get("prob", 0.1)
+
+                        if (nudity_score > self.sightengine_nsfw_threshold or 
+                            suggestive_score > (self.sightengine_nsfw_threshold + 0.2) or 
+                            offensive_prob > 0.85): 
+                            logger.info(f"NSFW media detected: {media_url} (Nudity: {nudity_score:.2f}, Suggestive: {suggestive_score:.2f}, Offensive: {offensive_prob:.2f})")
+                            return True
+                        return False
+                    else:
+                        error_msg = data.get("error", {}).get("message", "Unknown error")
+                        logger.error(f"Sightengine API error for {media_url}: {error_msg} (Status: {data.get('status')})")
+                        return False
+                elif response.status == 429:
+                    logger.warning(f"Sightengine rate limit hit. Cannot check {media_url}.")
+                    return False 
+                else:
+                    logger.error(f"Sightengine API request failed for {media_url} with status: {response.status}")
+                    return False
+        except asyncio.TimeoutError:
+            logger.error(f"Sightengine API request timed out for {media_url}.")
+            return False
+        except client_exceptions.ClientConnectorError as e: 
+            logger.error(f"Sightengine connection error for {media_url}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error during Sightengine check for {media_url}: {e}", exc_info=True)
+            return False
+
 
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def set_log_channel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the channel where moderation logs are sent."""
-        await set_guild_config(ctx.guild.id, "log_channel_id", channel.id)
-        await ctx.send(f"Moderation logs will now be sent to {channel.mention}.")
-        await log_action("config_change", ctx.author, f"Set log channel to {channel.name}")
+    async def set_log_channel(self, ctx: commands.Context, channel: discord.TextChannel = None):
+        """Set or clear the channel where moderation logs are sent. No argument to clear."""
+        if channel:
+            await set_guild_config(ctx.guild.id, "log_channel_id", channel.id)
+            await ctx.send(f"Moderation logs will now be sent to {channel.mention}.")
+            await log_action("config_change", ctx.author, f"Set log channel to #{channel.name}", guild=ctx.guild)
+        else:
+            await set_guild_config(ctx.guild.id, "log_channel_id", None) 
+            await ctx.send("Moderation log channel has been cleared. Logs will only go to console if no default is set.")
+            await log_action("config_change", ctx.author, "Cleared log channel", guild=ctx.guild)
+
 
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def set_link_channel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the channel where links are allowed without being flagged as advertising."""
-        await set_guild_config(ctx.guild.id, "link_channel_id", channel.id)
-        await ctx.send(f"Link posting channel set to {channel.mention}")
-        await log_action("config_change", ctx.author, f"Set link channel to {channel.name}")
+    async def set_link_channel(self, ctx: commands.Context, channel: discord.TextChannel = None):
+        """Set or clear the channel where links are allowed without being flagged as advertising. No arg to clear."""
+        if channel:
+            await set_guild_config(ctx.guild.id, "link_channel_id", channel.id)
+            await ctx.send(f"Link posting channel set to {channel.mention}. Links outside may be restricted.")
+            await log_action("config_change", ctx.author, f"Set link channel to #{channel.name}", guild=ctx.guild)
+        else:
+            await set_guild_config(ctx.guild.id, "link_channel_id", None)
+            await ctx.send("Link posting channel restriction has been cleared.")
+            await log_action("config_change", ctx.author, "Cleared link channel", guild=ctx.guild)
+
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def add_permitted_domain(self, ctx: commands.Context, domain: str):
         """Add a domain to the list of permitted domains for links."""
-        current_permitted_domains = await get_guild_config(ctx.guild.id, "permitted_domains", list(PERMITTED_DOMAINS))
-        cleaned_domain = get_domain_from_url(domain)
-        if cleaned_domain and cleaned_domain not in current_permitted_domains:
-            current_permitted_domains.append(cleaned_domain)
-            await set_guild_config(ctx.guild.id, "permitted_domains", current_permitted_domains)
-            await ctx.send(f"Added `{cleaned_domain}` to permitted domains.")
-            await log_action("config_change", ctx.author, f"Added permitted domain: {cleaned_domain}")
+        current_guild_domains = await get_guild_config(ctx.guild.id, "permitted_domains", list(PERMITTED_DOMAINS))
+        if not isinstance(current_guild_domains, list):
+            logger.warning(f"Permitted domains for guild {ctx.guild.id} was not a list: {current_guild_domains}. Resetting from default.")
+            current_guild_domains = list(PERMITTED_DOMAINS)
+
+        cleaned_domain = get_domain_from_url(domain) 
+        if cleaned_domain and cleaned_domain not in current_guild_domains:
+            current_guild_domains.append(cleaned_domain)
+            await set_guild_config(ctx.guild.id, "permitted_domains", current_guild_domains)
+            await ctx.send(f"Added `{cleaned_domain}` to this guild's permitted domains.")
+            await log_action("config_change", ctx.author, f"Added permitted domain: {cleaned_domain}", guild=ctx.guild)
+        elif cleaned_domain in current_guild_domains:
+            await ctx.send(f"`{cleaned_domain}` is already in the permitted list.")
         else:
-            await ctx.send(f"`{cleaned_domain}` is already in the permitted list or invalid.")
+            await ctx.send(f"Invalid domain format: `{domain}`.")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def remove_permitted_domain(self, ctx: commands.Context, domain: str):
-        """Remove a domain from the list of permitted domains for links."""
-        current_permitted_domains = await get_guild_config(ctx.guild.id, "permitted_domains", list(PERMITTED_DOMAINS))
+        """Remove a domain from this guild's list of permitted domains."""
+        current_guild_domains = await get_guild_config(ctx.guild.id, "permitted_domains", list(PERMITTED_DOMAINS))
+        if not isinstance(current_guild_domains, list):
+             current_guild_domains = list(PERMITTED_DOMAINS) 
+
         cleaned_domain = get_domain_from_url(domain)
-        if cleaned_domain and cleaned_domain in current_permitted_domains:
-            current_permitted_domains.remove(cleaned_domain)
-            await set_guild_config(ctx.guild.id, "permitted_domains", current_permitted_domains)
-            await ctx.send(f"Removed `{cleaned_domain}` from permitted domains.")
-            await log_action("config_change", ctx.author, f"Removed permitted domain: {cleaned_domain}")
+        if cleaned_domain and cleaned_domain in current_guild_domains:
+            current_guild_domains.remove(cleaned_domain)
+            await set_guild_config(ctx.guild.id, "permitted_domains", current_guild_domains)
+            await ctx.send(f"Removed `{cleaned_domain}` from this guild's permitted domains.")
+            await log_action("config_change", ctx.author, f"Removed permitted domain: {cleaned_domain}", guild=ctx.guild)
+        elif cleaned_domain:
+            await ctx.send(f"`{cleaned_domain}` not found in this guild's custom permitted list.")
         else:
-            await ctx.send(f"`{cleaned_domain}` not found in the permitted list or invalid.")
+            await ctx.send(f"Invalid domain format: `{domain}`.")
+            
+    @commands.command(name="list_permitted_domains")
+    @commands.has_permissions(manage_messages=True)
+    async def list_permitted_domains(self, ctx: commands.Context):
+        """Lists all currently permitted domains for this guild."""
+        guild_domains = await get_guild_config(ctx.guild.id, "permitted_domains", list(PERMITTED_DOMAINS))
+        if not guild_domains:
+            await ctx.send("No domains are currently specifically permitted for this guild (global defaults may apply if not overridden).")
+            return
+        
+        embed = discord.Embed(title=f"Permitted Domains for {ctx.guild.name}", color=discord.Color.blue())
+        domain_list_str = "\n".join([f"- `{d}`" for d in sorted(guild_domains)])
+        if len(domain_list_str) > 1900 : 
+             domain_list_str = domain_list_str[:1900] + "\n... (list too long to display fully)"
+        embed.description = domain_list_str
+        await ctx.send(embed=embed)
+
 
     @commands.command()
     @commands.has_permissions(manage_messages=True)
     async def infractions(self, ctx: commands.Context, member: discord.Member):
-        """View a user's infraction history."""
+        """View a user's recent infractions and active points."""
         if not db_conn:
-            await ctx.send("Database is not connected.")
+            await ctx.send("Database is not connected, cannot retrieve infractions.")
             return
 
         async with db_conn.cursor() as cursor:
-            cutoff_date = (datetime.utcnow() - timedelta(days=30)).isoformat()
+            cutoff_date_active = (datetime.utcnow() - timedelta(days=30)).isoformat()
             await cursor.execute(
-                'SELECT SUM(points) FROM infractions WHERE user_id = ? AND guild_id = ? AND timestamp > ?',
-                (member.id, ctx.guild.id, cutoff_date)
+                'SELECT SUM(points) FROM infractions WHERE user_id = ? AND guild_id = ? AND timestamp >= ?',
+                (member.id, ctx.guild.id, cutoff_date_active)
             )
-            total_points = (await cursor.fetchone())[0] or 0
+            total_points_data = await cursor.fetchone()
+            total_active_points = total_points_data[0] if total_points_data and total_points_data[0] is not None else 0
+
 
             await cursor.execute('''
-                SELECT points, timestamp, violation_type FROM infractions
+                SELECT points, timestamp, violation_type, message_id FROM infractions
                 WHERE user_id = ? AND guild_id = ?
                 ORDER BY timestamp DESC
                 LIMIT 10
@@ -666,120 +978,244 @@ class Moderation(commands.Cog):
 
         embed = discord.Embed(
             title=f"Infraction Report for {member.display_name}",
-            color=discord.Color.blue()
+            description=f"User ID: {member.id}",
+            color=discord.Color.orange() if total_active_points > 0 else discord.Color.green()
         )
-        embed.add_field(name="Total Active Points (Last for a Month)", value=str(total_points), inline=False)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Total Active Points (Last 30 Days)", value=f"**{total_active_points}**", inline=False)
 
         if records:
-            response = ""
-            for points, timestamp_str, violation_type in records:
-                timestamp = datetime.fromisoformat(timestamp_str)
-                response += f"- **{points} points** ({violation_type.replace('_', ' ').title()}) on {timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-            embed.add_field(name="Recent Infractions (Last 10)", value=response, inline=False)
+            history_str = ""
+            for points, ts_str, vio_type, msg_id in records:
+                ts_dt = datetime.fromisoformat(ts_str)
+                is_active = ts_dt >= datetime.fromisoformat(cutoff_date_active)
+                active_marker = " (Active)" if is_active else ""
+                entry = (f"- **{points} pts** ({vio_type.replace('_', ' ').title()}){active_marker} "
+                         f"on {ts_dt.strftime('%Y-%m-%d %H:%M')} UTC")
+                if msg_id: 
+                    entry += f" (Msg ID: {msg_id})"
+                history_str += entry + "\n"
+            
+            if len(history_str) > 1020: history_str = history_str[:1020] + "..." 
+            embed.add_field(name="Recent Infraction History (Max 10)", value=history_str if history_str else "None found.", inline=False)
         else:
-            embed.add_field(name="Recent Infractions", value=f"No recent infractions found for {member.display_name}.", inline=False)
+            embed.add_field(name="Recent Infraction History", value="No infractions recorded for this user.", inline=False)
 
+        embed.set_footer(text=f"Report generated at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
         await ctx.send(embed=embed)
 
     @commands.command()
-    @commands.has_permissions(manage_guild=True)
-    async def clear_infractions(self, ctx: commands.Context, member: discord.Member):
-        """Manually clear all infraction points for a user in this guild."""
+    @commands.has_permissions(manage_guild=True) 
+    async def clear_infractions(self, ctx: commands.Context, member: discord.Member, specific_violation_id: int = None):
+        """Manually clear all (or a specific) infraction points for a user in this guild."""
         if not db_conn:
             await ctx.send("Database is not connected.")
             return
+        
         async with db_conn.cursor() as cursor:
-            await cursor.execute('DELETE FROM infractions WHERE user_id = ? AND guild_id = ?', (member.id, ctx.guild.id))
-            await db_conn.commit()
-        await ctx.send(f"Cleared all infraction points for {member.display_name}.")
-        await log_action("infractions_cleared", ctx.author, f"Cleared infractions for {member.display_name}")
+            if specific_violation_id:
+                await cursor.execute('DELETE FROM infractions WHERE user_id = ? AND guild_id = ? AND id = ?', 
+                                     (member.id, ctx.guild.id, specific_violation_id))
+                action_taken = f"infraction ID {specific_violation_id}"
+            else:
+                await cursor.execute('DELETE FROM infractions WHERE user_id = ? AND guild_id = ?', (member.id, ctx.guild.id))
+                action_taken = "all infractions"
+
+            if cursor.rowcount > 0:
+                await db_conn.commit()
+                await ctx.send(f"Cleared {action_taken} for {member.display_name}.")
+                await log_action("infractions_cleared", ctx.author, f"Cleared {action_taken} for {member.mention} ({member.id})", guild=ctx.guild)
+            else:
+                await ctx.send(f"No matching infractions found for {member.display_name} to clear ({action_taken}).")
+
 
     @commands.command()
-    @commands.has_permissions(kick_members=True)
-    async def manual_warn(self, ctx: commands.Context, member: discord.Member, *, reason: str = "No reason provided."):
+    @commands.has_permissions(kick_members=True) 
+    async def manual_warn(self, ctx: commands.Context, member: discord.Member, *, reason: str = "No reason provided by moderator."):
         """Manually warn a user."""
-        await apply_punishment(member, "warn", f"Manual warn by {ctx.author.name}: {reason}")
-        await ctx.send(f"Warned {member.display_name}.")
+        full_reason = f"Manual warn by {ctx.author.name} ({ctx.author.id}): {reason}"
+        await apply_punishment(member, "warn", full_reason)
+        await ctx.send(f"Warned {member.display_name}. Reason: {reason}")
 
     @commands.command()
     @commands.has_permissions(kick_members=True)
-    async def manual_mute(self, ctx: commands.Context, member: discord.Member, duration_hours: float, *, reason: str = "No reason provided."):
+    async def manual_mute(self, ctx: commands.Context, member: discord.Member, duration_hours: float, *, reason: str = "No reason provided by moderator."):
         """Manually mute a user for a specified number of hours."""
+        if duration_hours <= 0:
+            await ctx.send("Mute duration must be positive.")
+            return
         duration = timedelta(hours=duration_hours)
-        await apply_punishment(member, "mute", f"Manual mute by {ctx.author.name}: {reason}", duration=duration)
-        await ctx.send(f"Muted {member.display_name} for {duration_hours} hours.")
+        full_reason = f"Manual mute by {ctx.author.name} ({ctx.author.id}): {reason}"
+        await apply_punishment(member, "mute", full_reason, duration=duration)
+        await ctx.send(f"Muted {member.display_name} for {duration_hours} hours. Reason: {reason}")
 
     @commands.command()
     @commands.has_permissions(kick_members=True)
-    async def manual_kick(self, ctx: commands.Context, member: discord.Member, *, reason: str = "No reason provided."):
+    async def manual_kick(self, ctx: commands.Context, member: discord.Member, *, reason: str = "No reason provided by moderator."):
         """Manually kick a user."""
-        await apply_punishment(member, "kick", f"Manual kick by {ctx.author.name}: {reason}")
-        await ctx.send(f"Kicked {member.display_name}.")
+        full_reason = f"Manual kick by {ctx.author.name} ({ctx.author.id}): {reason}"
+        await apply_punishment(member, "kick", full_reason)
+        await ctx.send(f"Kicked {member.display_name}. Reason: {reason}") 
 
     @commands.command()
     @commands.has_permissions(ban_members=True)
-    async def manual_ban(self, ctx: commands.Context, member: discord.Member, duration_days: float = None, *, reason: str = "No reason provided."):
-        """Manually ban a user (temporarily or permanently)."""
-        if duration_days:
+    async def manual_ban(self, ctx: commands.Context, member_or_id: discord.User | int , duration_days: float = None, *, reason: str = "No reason provided by moderator."):
+        """Manually ban a user (temporarily or permanently). Provide User ID or @User."""
+        
+        target_user: discord.User | None = None
+        if isinstance(member_or_id, discord.User): 
+            target_user = member_or_id
+        elif isinstance(member_or_id, int): 
+            try:
+                target_user = await bot.fetch_user(member_or_id)
+            except discord.NotFound:
+                await ctx.send(f"User with ID `{member_or_id}` not found.")
+                return
+            except discord.HTTPException as e:
+                 await ctx.send(f"Failed to fetch user ID `{member_or_id}`: {e}")
+                 return
+        else: 
+            await ctx.send("Invalid user provided. Please use @User or UserID.")
+            return
+        
+        if not target_user: 
+            await ctx.send("Could not identify target user.")
+            return
+
+        member = ctx.guild.get_member(target_user.id) 
+
+        full_reason = f"Manual ban by {ctx.author.name} ({ctx.author.id}): {reason}"
+        action_type = "ban"
+        duration = None
+
+        if duration_days is not None:
+            if duration_days <= 0:
+                await ctx.send("Ban duration must be positive.")
+                return
             duration = timedelta(days=duration_days)
-            await apply_punishment(member, "temp_ban", f"Manual temp ban by {ctx.author.name}: {reason}", duration=duration)
-            await ctx.send(f"Temporarily banned {member.display_name} for {duration_days} days.")
-        else:
-            await apply_punishment(member, "ban", f"Manual ban by {ctx.author.name}: {reason}")
-            await ctx.send(f"Permanently banned {member.display_name}.")
+            action_type = "temp_ban"
+            if member: 
+                await apply_punishment(member, action_type, full_reason, duration=duration)
+                await ctx.send(f"Temporarily banned {target_user.name}#{target_user.discriminator} for {duration_days} days. Reason: {reason}")
+            else: 
+                unban_time = datetime.utcnow() + duration
+                async with db_conn.cursor() as cursor: 
+                    await cursor.execute(
+                        'INSERT OR REPLACE INTO temp_bans (user_id, guild_id, unban_time, ban_reason) VALUES (?, ?, ?, ?)',
+                        (target_user.id, ctx.guild.id, unban_time.isoformat(), full_reason)
+                    )
+                    await db_conn.commit()
+                await ctx.guild.ban(target_user, reason=full_reason, delete_message_days=0)
+                await log_action(action_type, target_user, full_reason, guild=ctx.guild)
+                await ctx.send(f"Temporarily banned user ID {target_user.id} for {duration_days} days (not in server or DMs failed). Reason: {reason}")
+
+        else: 
+            await ctx.guild.ban(target_user, reason=full_reason, delete_message_days=0) 
+            await log_action(action_type, member if member else target_user, full_reason, guild=ctx.guild)
+            await ctx.send(f"Permanently banned {target_user.name}#{target_user.discriminator}. Reason: {reason}")
+
 
     @commands.command()
     @commands.has_permissions(ban_members=True)
-    async def manual_unban(self, ctx: commands.Context, user_id: int, *, reason: str = "No reason provided."):
+    async def manual_unban(self, ctx: commands.Context, user_id: int, *, reason: str = "No reason provided by moderator."):
         """Manually unban a user by their ID."""
-        user = discord.Object(id=user_id)
         try:
-            await ctx.guild.unban(user, reason=f"Manual unban by {ctx.author.name}: {reason}")
+            user_to_unban = await bot.fetch_user(user_id) 
+        except discord.NotFound:
+            await ctx.send(f"User with ID `{user_id}` not found by Discord.")
+            return
+        except discord.HTTPException as e:
+            await ctx.send(f"Error fetching user ID `{user_id}`: {e}")
+            return
+
+        full_reason = f"Manual unban by {ctx.author.name} ({ctx.author.id}): {reason}"
+        try:
+            bans = [entry async for entry in ctx.guild.bans(limit=None) if entry.user.id == user_id] 
+            if not bans:
+                await ctx.send(f"{user_to_unban.name}#{user_to_unban.discriminator} (ID: {user_id}) is not banned.")
+                return
+            
+            await ctx.guild.unban(user_to_unban, reason=full_reason)
             async with db_conn.cursor() as cursor:
                 await cursor.execute('DELETE FROM temp_bans WHERE user_id = ? AND guild_id = ?', (user_id, ctx.guild.id))
                 await db_conn.commit()
-            await ctx.send(f"Unbanned user with ID {user_id}.")
-            unbanned_member = await bot.fetch_user(user_id)
-            await log_action("unban", unbanned_member, f"Manual unban by {ctx.author.name}: {reason}")
-        except discord.NotFound:
-            await ctx.send(f"User with ID {user_id} not found in ban list.")
+            
+            await ctx.send(f"Unbanned {user_to_unban.name}#{user_to_unban.discriminator} (ID: {user_id}). Reason: {reason}")
+            await log_action("unban", user_to_unban, full_reason, guild=ctx.guild)
+        except discord.NotFound: 
+            await ctx.send(f"{user_to_unban.name}#{user_to_unban.discriminator} (ID: {user_id}) was not found in this server's ban list.")
         except discord.Forbidden:
             await ctx.send("I don't have permissions to unban members.")
-        except Exception as e:
+        except discord.HTTPException as e:
             logger.error(f"Error manually unbanning user {user_id}: {e}", exc_info=True)
-            await ctx.send("An error occurred while trying to unban the user.")
-
+            await ctx.send(f"An API error occurred while trying to unban the user: {e.text}")
+        except Exception as e:
+            logger.error(f"Unexpected error manually unbanning user {user_id}: {e}", exc_info=True)
+            await ctx.send("An unexpected error occurred.")
 
 class BotInfo(commands.Cog):
     def __init__(self, bot_instance: commands.Bot):
         self.bot = bot_instance
 
-    @app_commands.command(name="awake", description="Check if the bot is awake.")
-    async def awake(self, interaction: discord.Interaction):
-        """Respond to the awake command."""
-        await interaction.response.send_message("Awake. Never Sleep.", ephemeral=True)
+    @app_commands.command(name="awake", description="Check if the bot is awake and responsive.")
+    async def awake_slash(self, interaction: discord.Interaction):
+        """Respond to the /awake slash command."""
+        await interaction.response.send_message("I am Adroit. I am always awake. Never sleeping.", ephemeral=True)
 
-    @commands.command()
-    async def beta_classify(self, ctx: commands.Context):
-        """Example command using language detection."""
-        if not ctx.message.reference:
-            await ctx.send("Please reply to a message to classify its language.")
+    @commands.command(name="awake")
+    async def awake_prefix(self, ctx: commands.Context):
+        """Respond to the >>awake prefix command."""
+        await ctx.send("I am Adroit. I am always awake. Never sleeping.", delete_after=10)
+
+
+    @commands.command(name="classify")
+    @commands.cooldown(1, 5, commands.BucketType.user) 
+    async def classify_language(self, ctx: commands.Context, *, text_to_classify: str = None):
+        """Classify the language of replied message or provided text. Uses FastText."""
+        if not LANGUAGE_MODEL:
+            await ctx.send("Language model is not loaded, cannot classify.")
             return
 
-        referenced_message = await ctx.message.channel.fetch_message(ctx.message.reference.message_id)
-        if not referenced_message:
-            await ctx.send("Could not find the referenced message.")
+        target_text = text_to_classify
+        if not target_text:
+            if ctx.message.reference and ctx.message.reference.message_id:
+                try:
+                    referenced_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+                    target_text = referenced_message.content
+                    if not target_text:
+                        await ctx.send("The replied message has no text content to classify.")
+                        return
+                except discord.NotFound:
+                    await ctx.send("Could not find the replied message.")
+                    return
+                except discord.HTTPException:
+                    await ctx.send("Failed to fetch the replied message.")
+                    return
+            else:
+                await ctx.send("Please reply to a message or provide text directly to classify its language. Usage: `>>classify [text]` or reply with `>>classify`")
+                return
+        
+        if not target_text.strip():
+            await ctx.send("Cannot classify empty text.")
             return
 
-        if not referenced_message.content:
-            await ctx.send("Referenced message has no text content to classify.")
-            return
+        lang_code, confidence = await detect_language_ai(target_text)
+        
+        embed = discord.Embed(title="Language Classification", color=discord.Color.blue())
+        embed.add_field(name="Text Snippet", value=f"```{discord.utils.escape_markdown(target_text[:200])}...```", inline=False)
+        embed.add_field(name="Detected Language", value=f"**{lang_code.upper()}**", inline=True)
+        embed.add_field(name="Confidence", value=f"{confidence:.2%}", inline=True)
+        
+        allowed_langs = await get_guild_config(ctx.guild.id, f"channel_config_{ctx.channel.id}.language") or \
+        await get_guild_config(ctx.guild.id, "allowed_languages") or \
+        DEFAULT_CHANNEL_CONFIGS.get(ctx.channel.id, {}).get("language")
+        if allowed_langs and isinstance(allowed_langs, list):
+            status = "Allowed" if lang_code in allowed_langs else "Not Allowed"
+            embed.add_field(name="Channel Status", value=f"{status} (Allowed: {', '.join(allowed_langs)})", inline=False)
 
-        lang = await detect_language_ai(referenced_message.content)
-        await ctx.send(f"Language of the replied message: **{lang.upper()}**")
+        await ctx.send(embed=embed)
 
 async def init_db():
-    """Initialize the SQLite database for infractions, temp bans, and guild configs."""
     if not db_conn:
         logger.critical("Database connection not established. Cannot initialize DB.")
         return
@@ -791,51 +1227,77 @@ async def init_db():
                 user_id INTEGER NOT NULL,
                 guild_id INTEGER NOT NULL,
                 points INTEGER NOT NULL,
-                timestamp TEXT NOT NULL,
+                timestamp TEXT NOT NULL,     -- ISO format UTC timestamp
                 violation_type TEXT,
-                message_id INTEGER,
-                channel_id INTEGER
+                message_id INTEGER,          -- ID of the offending message
+                channel_id INTEGER           -- ID of the channel where infraction occurred
             )
         ''')
+        await cursor.execute('CREATE INDEX IF NOT EXISTS idx_infractions_user_guild_time ON infractions (user_id, guild_id, timestamp)')
+
         await cursor.execute('''
             CREATE TABLE IF NOT EXISTS temp_bans (
-                user_id INTEGER PRIMARY KEY, -- User can only have one active temp ban per guild
-                guild_id INTEGER NOT NULL,
-                unban_time TEXT NOT NULL,
-                ban_reason TEXT
+                user_id INTEGER NOT NULL,    -- User ID
+                guild_id INTEGER NOT NULL,   -- Guild ID
+                unban_time TEXT NOT NULL,    -- ISO format UTC timestamp for when to unban
+                ban_reason TEXT,
+                PRIMARY KEY (user_id, guild_id) -- User can only have one active temp ban per guild
             )
         ''')
+        await cursor.execute('CREATE INDEX IF NOT EXISTS idx_temp_bans_unban_time ON temp_bans (unban_time)')
+
+
         await cursor.execute('''
             CREATE TABLE IF NOT EXISTS guild_configs (
                 guild_id INTEGER NOT NULL,
                 key TEXT NOT NULL,
-                value TEXT, -- Store values as text, potentially JSON for lists/dicts
+                value TEXT,                  -- Store complex values as JSON strings
                 PRIMARY KEY (guild_id, key)
             )
         ''')
         await db_conn.commit()
-    logger.info("Database schema checked/created.")
+    logger.info("Database schema checked/created successfully.")
 
 
 async def main():
-    async with bot:
+    async with bot: 
         await bot.add_cog(Moderation(bot))
         await bot.add_cog(BotInfo(bot))
-        await bot.start(DISCORD_TOKEN) # Deus ex Machina
+        
+        try:
+            await bot.start(DISCORD_TOKEN)
+        except discord.LoginFailure:
+            logger.critical("CRITICAL: Failed to log in. Check your DISCORD_TOKEN.")
+        except Exception as e:
+            logger.critical(f"CRITICAL: Error during bot startup or runtime: {e}", exc_info=True)
+        finally: 
+            pass 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot shutting down due to KeyboardInterrupt.")
+        logger.info("Bot shutting down due to KeyboardInterrupt (Ctrl+C)...")
     except Exception as e:
-        logger.critical(f"Unhandled exception during bot runtime: {e}", exc_info=True)
+        logger.critical(f"Unhandled exception at the very top level: {e}", exc_info=True)
     finally:
+        logger.info("Initiating final cleanup...")
+        if http_session and not http_session.closed:
+             asyncio.run(http_session.close()) 
+             logger.info("Aiohttp session closed.")
         if db_conn:
             asyncio.run(db_conn.close())
             logger.info("Database connection closed.")
-        if http_session:
-            asyncio.run(http_session.close())
-            logger.info("HTTP session closed.")
-    logger.info("Bot process ended.")
-    
+
+        # try:
+        #     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        #     if tasks:
+        #         logger.info(f"Cancelling {len(tasks)} outstanding asyncio tasks...")
+        #         [task.cancel() for task in tasks]
+        #         asyncio.run(asyncio.gather(*tasks, return_exceptions=True)) # Allow tasks to clean up
+        #         logger.info("Outstanding tasks cancelled.")
+        # except RuntimeError as e: # Can happen if event loop is already closed
+        #      logger.warning(f"Could not cancel tasks, event loop likely closed: {e}")
+
+
+    logger.info("Bot process finished.")
