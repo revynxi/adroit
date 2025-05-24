@@ -78,7 +78,7 @@ PUNISHMENT_SYSTEM = {
         10: {"action": "mute", "duration_hours": 1, "reason": "Spam/Minor violations"},
         15: {"action": "kick", "reason": "Repeated violations"},
         25: {"action": "temp_ban", "duration_days": 1, "reason": "Serious/Persistent violations"},
-        50: {"action": "temp_ban", "duration_months": 1, "reason": "Severe/Accumulated violations"}
+        50: {"action": "temp_ban", "duration_months": 1, "reason": "Severe/Accumulated violations"},
         10000: {"action": "ban", "reason": "A literal war criminal"} # Impossible to achieve, only admin can give that much points
     },
     "violations": {
