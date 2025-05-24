@@ -175,7 +175,7 @@ async def get_guild_config(guild_id, key, default):
                 try:
                     return json.loads(result[0])
                 except json.JSONDecodeError:
-                    return result[0]
+                    return result[0] 
             return default
     except Exception as e:
         logger.error(f"Error getting guild config for guild {guild_id}, key {key}: {e}", exc_info=True)
@@ -722,7 +722,7 @@ class Moderation(commands.Cog):
                         violations.add("foreign_language")
                         logger.debug(f"Foreign language violation by {message.author.name} in {message.channel.name}: '{detected_lang_code}' (Conf: {confidence:.2f}) not in {allowed_languages}. Message: '{content_raw[:50]}...'")
         
-        link_channel_id_config = await get_guild_config(guild_id, "link_channel_id") 
+        link_channel_id_config = await get_guild_config(guild_id, "link_channel_id", None) 
         link_channel_id = int(link_channel_id_config) if link_channel_id_config and str(link_channel_id_config).isdigit() else None
 
 
