@@ -633,15 +633,13 @@ class Moderation(commands.Cog):
         if message.author.bot or not message.guild or not db_conn:
             return
 
-        if isinstance(bot.command_prefix, str) and message.content.startswith(bot.command_prefix):
-             pass 
-
         violations = set()
         guild_id = message.guild.id
         user_id = message.author.id
         content_raw = message.content 
         content_lower = clean_message_content(content_raw) 
         now = datetime.utcnow()
+        current_timestamp = now.timestamp()
 
         try:
             await db_conn.execute(
@@ -664,7 +662,7 @@ class Moderation(commands.Cog):
                 logger.debug(f"Spam (frequency, DB) by {message.author.name}: {count_freq} msgs in {SPAM_WINDOW}s")
         except Exception as e:
             logger.error(f"Error querying message history for frequency spam: {e}", exc_info=True)
-
+            
         try:
             cursor = await db_conn.execute(
                 "SELECT COUNT(*) FROM message_history WHERE user_id = ? AND guild_id = ? AND message_content = ? AND timestamp >= ?",
@@ -676,33 +674,17 @@ class Moderation(commands.Cog):
                 logger.debug(f"Spam (repetition, DB) by {message.author.name}: '{content_raw[:50]}...'")
         except Exception as e:
             logger.error(f"Error querying message history for repetition spam: {e}", exc_info=True)
-            
+
+
         channel_specific_db_config = await get_guild_config(guild_id, f"channel_config_{message.channel.id}", {})
-        # guild_wide_lang = await get_guild_config(guild_id, "allowed_languages", None) 
-     
+        
         channel_cfg = DEFAULT_CHANNEL_CONFIGS.get(message.channel.id, {}).copy() 
         if isinstance(channel_specific_db_config, dict): 
             channel_cfg.update(channel_specific_db_config)
         else: 
             logger.warning(f"channel_config_{message.channel.id} for guild {guild_id} was not a dict: {channel_specific_db_config}")
-
+        
         guild_permitted_domains = await get_guild_config(guild_id, "permitted_domains", list(PERMITTED_DOMAINS))
-
-
-        user_timestamps = user_message_timestamps[guild_id][user_id]
-        user_timestamps.append(now)
-        while user_timestamps and (now - user_timestamps[0]).total_seconds() >= SPAM_WINDOW:
-            user_timestamps.popleft()
-        if len(user_timestamps) > SPAM_LIMIT:
-            violations.add("spam")
-            logger.debug(f"Spam (frequency) by {message.author.name}: {len(user_timestamps)} msgs in {SPAM_WINDOW}s")
-
-        user_hist = user_message_history[guild_id][user_id]
-        if content_raw and content_raw in [msg_content for _, msg_content in list(user_hist)]:
-            violations.add("spam")
-            logger.debug(f"Spam (repetition) by {message.author.name}: '{content_raw[:50]}...'")
-        user_hist.append((now, content_raw))
-
 
         if len(message.mentions) > MENTION_LIMIT:
             violations.add("excessive_mentions")
@@ -724,18 +706,18 @@ class Moderation(commands.Cog):
             if skip_lang_check_reason:
                 logger.debug(f"Skipping language check for '{content_raw[:50]}...': {skip_lang_check_reason}.")
             else:
-                detected_lang_code, confidence = await detect_language_ai(content_raw) # Use raw for detection
+                detected_lang_code, confidence = await detect_language_ai(content_raw) 
                 logger.debug(f"Language detection for '{content_raw[:50]}...': Lang={detected_lang_code}, Conf={confidence:.2f}")
 
                 if detected_lang_code not in allowed_languages:
                     if detected_lang_code == "und":
-                        logger.info(f"Language undetermined for '{content_raw[:50]}...'. Not flagging as foreign language.")
+                        logger.info(f"Language undetermined for '{content_lower}'. Not flagging as foreign language.")
                     elif content_lower in COMMON_SAFE_FOREIGN_WORDS:
                         logger.info(f"Message '{content_lower}' is a common safe word, detected as {detected_lang_code}. Not flagging as foreign language unless confidence is very high.")
                     elif len(content_lower) < SHORT_MSG_THRESHOLD and confidence < MIN_CONFIDENCE_SHORT_MSG:
-                        logger.info(f"Low confidence ({confidence:.2f} < {MIN_CONFIDENCE_SHORT_MSG}) for short message '{content_raw[:50]}...' (lang: {detected_lang_code}). Not flagging as foreign.")
+                        logger.info(f"Low confidence ({confidence:.2f} < {MIN_CONFIDENCE_SHORT_MSG}) for short message '{content_lower}' (lang: {detected_lang_code}). Not flagging as foreign.")
                     elif confidence < MIN_CONFIDENCE_FOR_FLAGGING:
-                         logger.info(f"Low confidence ({confidence:.2f} < {MIN_CONFIDENCE_FOR_FLAGGING}) for message '{content_raw[:50]}...' (lang: {detected_lang_code}). Not flagging as foreign.")
+                         logger.info(f"Low confidence ({confidence:.2f} < {MIN_CONFIDENCE_FOR_FLAGGING}) for message '{content_lower}' (lang: {detected_lang_code}). Not flagging as foreign.")
                     else:
                         violations.add("foreign_language")
                         logger.debug(f"Foreign language violation by {message.author.name} in {message.channel.name}: '{detected_lang_code}' (Conf: {confidence:.2f}) not in {allowed_languages}. Message: '{content_raw[:50]}...'")
@@ -764,14 +746,14 @@ class Moderation(commands.Cog):
 
 
         words_in_message = set(re.findall(r'\b\w+\b', content_lower))
-        if any(word in discrimination_words for word in words_in_message) or \
-           any(pattern.search(content_lower) for pattern in discrimination_patterns):
+        if any(word in self.discrimination_words for word in words_in_message) or \
+           any(pattern.search(content_lower) for pattern in self.discrimination_patterns):
             violations.add("discrimination")
             logger.debug(f"Discrimination (local list) by {message.author.name}: '{content_raw[:50]}...'")
 
 
-        if any(word in nsfw_words for word in words_in_message) or \
-           any(pattern.search(content_lower) for pattern in nsfw_patterns):
+        if any(word in self.nsfw_words for word in words_in_message) or \
+           any(pattern.search(content_lower) for pattern in self.nsfw_patterns):
             violations.add("nsfw")
             logger.debug(f"NSFW (local list) by {message.author.name}: '{content_raw[:50]}...'")
 
@@ -785,9 +767,6 @@ class Moderation(commands.Cog):
                 "politics", "religion", 
                 "democrat", "republican", "liberal", "conservative" 
             ]
-            # if any(term in content_lower for term in general_sensitive_terms):
-            # violations.add("politics_discussion") # Or a more generic "sensitive_topic"
-            # logger.debug(f"Sensitive topic (politics/religion) by {message.author.name}: '{content_raw[:50]}...'")
             pass 
 
 
@@ -798,7 +777,7 @@ class Moderation(commands.Cog):
                     if SIGHTENGINE_API_USER and SIGHTENGINE_API_SECRET:
                         logger.info(f"Checking attachment '{attachment.filename}' ({content_type}) with Sightengine...")
                         try:
-                            is_media_nsfw = await self.check_media_nsfw_sightengine(attachment.url)
+                            is_media_nsfw = await self.check_media_nsfw_sightengine(attachment.url) 
                             if is_media_nsfw:
                                 violations.add("nsfw_media")
                                 logger.info(f"NSFW media (Sightengine) violation: {attachment.url} by {message.author.name}")
@@ -822,6 +801,7 @@ class Moderation(commands.Cog):
                     violations.add("nsfw")
                 if categories.get("self-harm", False):
                     violations.add("nsfw") 
+
 
         if violations:
             logger.info(f"Message from {message.author.name} ({user_id}) in #{message.channel.name} ({message.channel.id}) "
@@ -852,8 +832,7 @@ class Moderation(commands.Cog):
                 logger.error(f"Missing permissions to send warning message in #{message.channel.name}.")
             except discord.HTTPException as e:
                  logger.error(f"HTTP error sending warning message: {e.status} - {e.text}")
-
-        else: 
+        else:
             await self.bot.process_commands(message)
 
     async def check_media_nsfw_sightengine(self, media_url: str) -> bool:
