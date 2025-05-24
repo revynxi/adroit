@@ -78,7 +78,8 @@ PUNISHMENT_SYSTEM = {
         10: {"action": "mute", "duration_hours": 1, "reason": "Spam/Minor violations"},
         15: {"action": "kick", "reason": "Repeated violations"},
         25: {"action": "temp_ban", "duration_days": 1, "reason": "Serious/Persistent violations"},
-        50: {"action": "temp_ban", "duration_years": 1, "reason": "Severe/Accumulated violations"}
+        50: {"action": "temp_ban", "duration_months": 1, "reason": "Severe/Accumulated violations"}
+        10000: {"action": "ban", "reason": "A literal war criminal"} # Impossible to achieve, only admin can give that much points
     },
     "violations": {
         "discrimination": {"points": 2, "severity": "Medium"},
@@ -360,19 +361,16 @@ async def apply_punishment(member: discord.Member, action: str, reason: str, dur
         logger.error(f"Unexpected error applying {action} to {member.display_name}: {e}", exc_info=True)
 
 
-async def log_violation(member: discord.Member, violation_type: str, message: discord.Message):
-    points_config = PUNISHMENT_SYSTEM["violations"].get(violation_type)
-    if not points_config:
-        logger.warning(f"Unknown violation type '{violation_type}' encountered for user {member.id}. No points assigned.")
-        return
-    
-    points = points_config["points"]
-    message_summary = message.content[:75] + '...' if len(message.content) > 75 else message.content
-    reason_details = f"{violation_type.replace('_', ' ').title()}"
-    if message.content:
-        reason_details += f" (message: '{message_summary}')"
-    else:
-        reason_details += f" (message ID: {message.id})"
+async def log_violation(user, violation_type, message):
+    logger.info(f"VIOLATION: {user.name} ({user.id}) violated {violation_type} in {message.channel.name} ({message.channel.id}). Message: '{message.content[:100]}'")
+    try:
+        await db_conn.execute(
+            "INSERT INTO infractions (user_id, guild_id, violation_type, message_content, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (user.id, message.guild.id, violation_type, message.content[:100], datetime.utcnow().timestamp())
+        )
+        await db_conn.commit()
+    except Exception as e:
+        logger.error(f"Error logging violation to DB: {e}", exc_info=True)
 
 
     guild_id = member.guild.id
@@ -416,8 +414,8 @@ async def log_violation(member: discord.Member, violation_type: str, message: di
                 duration = timedelta(hours=punishment_config["duration_hours"])
             elif "duration_days" in punishment_config:
                 duration = timedelta(days=punishment_config["duration_days"])
-            elif "duration_years" in punishment_config:
-                duration = timedelta(years=punishment_config["duration_years"])
+            elif "duration_months" in punishment_config:
+                duration = timedelta(months=punishment_config["duration_months"])
             
             logger.info(f"Applying punishment '{action}' to {member.display_name} due to reaching {total_points} points (threshold: {threshold_points}).")
             await apply_punishment(member, action, auto_punishment_reason, duration)
@@ -1363,6 +1361,16 @@ async def main():
                 guild_id INTEGER NOT NULL,
                 timestamp REAL NOT NULL, -- Unix timestamp for easy time calculations
                 message_content TEXT NOT NULL
+            )
+        """)
+        await db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS infractions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                violation_type TEXT NOT NULL,
+                message_content TEXT, -- Store snippet of content
+                timestamp REAL NOT NULL
             )
         """)
         await db_conn.commit()
