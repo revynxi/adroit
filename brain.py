@@ -135,8 +135,11 @@ SHORT_MSG_THRESHOLD = 20
 
 COMMON_SAFE_FOREIGN_WORDS = {"bonjour", "hola", "merci", "gracias", "oui", "si", "nyet", "da", "salut", "ciao", "hallo", "guten tag"}
 
-discrimination_words, discrimination_patterns = load_terms_from_file('discrimination_terms.txt')
-nsfw_words, nsfw_patterns = load_terms_from_file('nsfw_terms.txt')
+discrimination_words = load_terms_from_file('discrimination_terms.txt')
+discrimination_patterns = compile_patterns(discrimination_words)
+
+nsfw_words = load_terms_from_file('nsfw_terms.txt')
+nsfw_patterns = compile_patterns(nsfw_words)
 
 def load_terms_from_file(filepath: str) -> tuple[set, list]:
     words = set()
