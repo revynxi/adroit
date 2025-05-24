@@ -1450,17 +1450,19 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot shutting down due to KeyboardInterrupt (Ctrl+C)...")
+        logger.info("Bot shutting down due to KeyboardInterrupt (Ctrl+C)...\n")
     except Exception as e:
         logger.critical(f"Unhandled exception at the very top level: {e}", exc_info=True)
     finally:
         logger.info("Initiating final cleanup...")
-        if http_session and not http_session.closed:
-             asyncio.run(http_session.close()) 
-             logger.info("Aiohttp session closed.")
-        if db_conn:
-            asyncio.run(db_conn.close())
-            logger.info("Database connection closed.")
+        # These lines caused premature shutdown and are now removed:
+        # if http_session and not http_session.closed:
+        #      asyncio.run(http_session.close())
+        #      logger.info("Aiohttp session closed.")
+        # if db_conn:
+        #     asyncio.run(db_conn.close())
+        #     logger.info("Database connection closed.")
+        pass 
 
         # try:
         #     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
