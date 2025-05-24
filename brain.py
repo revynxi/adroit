@@ -117,9 +117,12 @@ def compile_patterns(terms: set[str]) -> list[re.Pattern]:
     patterns = []
     for term in terms:
         try:
-            patterns.append(re.compile(r'\b' + re.escape(term) + r'\b', re.IGNORECASE))
+            escaped_term = re.escape(str(term))
+            patterns.append(re.compile(r'\b' + escaped_term + r'\b', re.IGNORECASE))
         except re.error as e:
             logger.error(f"Error compiling regex for term '{term}': {e}")
+        except TypeError as e:
+            logger.error(f"TypeError during regex compilation for term '{term}' (type: {type(term)}): {e}", exc_info=True)
     return patterns
 
 SPAM_WINDOW = 10  
