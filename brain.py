@@ -1445,6 +1445,30 @@ async def main():
     except Exception as e:
         logger.error(f"Unexpected error loading FastText model: {e}", exc_info=True)
         LANGUAGE_MODEL = None
+
+    async def health_check(request):
+        return web.Response(text="Bot is running and accessible!")
+
+    app = web.Application()
+    app.router.add_get("/", health_check)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    web_server_task = None
+    port = os.getenv("PORT")
+    if port:
+        try:
+            port = int(port)
+            site = web.TCPSite(runner, host="0.0.0.0", port=port)
+            web_server_task = asyncio.create_task(site.start()) 
+            logger.info(f"Web server background task created on port {port}.")
+        except ValueError:
+            logger.error(f"Invalid PORT environment variable: '{os.getenv('PORT')}'. Port must be an integer.")
+        except Exception as e:
+            logger.error(f"Error setting up web server: {e}", exc_info=True)
+    else:
+        logger.warning("PORT environment variable not set. Web server will not start.")
         
 if __name__ == "__main__":
     try:
