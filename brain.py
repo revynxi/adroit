@@ -1438,7 +1438,7 @@ async def main():
         except Exception as e:
             logger.error(f"Failed to sync slash commands: {e}", exc_info=True)
 
-    await bot.add_cog(Moderation(bot, discrimination_words, discrimination_patterns, nsfw_words, nsfw_patterns))
+    await bot.add_cog(Moderation(bot))
 
     try:
         await bot.start(DISCORD_TOKEN)
