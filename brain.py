@@ -554,50 +554,6 @@ async def cleanup_message_tracking():
     if not (cleaned_users_timestamps or cleaned_guilds_timestamps or cleaned_users_history or cleaned_guilds_history):
         logger.info("Message tracking cleanup: No old data found to clean.")
 
-
-@bot.event
-async def on_ready():
-    logger.info(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
-    logger.info(f"Discord.py version: {discord.__version__}")
-    logger.info("------")
-
-    global http_session
-    http_session = ClientSession()
-
-    global db_conn
-    try:
-        db_conn = await aiosqlite.connect('infractions.db')
-        await init_db() 
-        logger.info("✅ Database initialized and connection established.")
-    except Exception as e:
-        logger.critical(f"❌ CRITICAL: Failed to connect to or initialize database: {e}", exc_info=True)
-        exit(1) # I see no point in keeping bot online if it can't even access it's own databases
-
-    global LANGUAGE_MODEL
-    if FASTTEXT_MODEL_PATH:
-        try:
-            LANGUAGE_MODEL = fasttext.load_model(FASTTEXT_MODEL_PATH)
-            logger.info(f"✅ Successfully loaded FastText model from {FASTTEXT_MODEL_PATH}")
-        except ValueError as ve: 
-            logger.error(f"❌ Failed to load FastText model: {ve}. Is '{FASTTEXT_MODEL_PATH}' a valid model file?", exc_info=True)
-        except Exception as e:
-            logger.error(f"❌ Failed to load FastText model from {FASTTEXT_MODEL_PATH}: {e}. Language detection will be impaired.", exc_info=True)
-    else:
-        logger.warning("FASTTEXT_MODEL_PATH not set. Language detection will be disabled.")
-
-
-    if db_conn: 
-        decay_points.start()
-        cleanup_message_tracking.start()
-    
-    await start_http_server() 
-
-    try:
-        synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} application command(s).")
-    except Exception as e:
-        logger.error(f"Failed to sync application commands: {e}", exc_info=True)
-
 @bot.event
 async def on_error(event_name, *args, **kwargs):
     logger.error(f"Unhandled error in event '{event_name}': Args: {args}, Kwargs: {kwargs}", exc_info=True)
@@ -1469,6 +1425,47 @@ async def main():
             logger.error(f"Error setting up web server: {e}", exc_info=True)
     else:
         logger.warning("PORT environment variable not set. Web server will not start.")
+
+    @bot.event
+    async def on_ready():
+        logger.info(f'{bot.user} has connected to Discord!')
+        logger.info(f'Bot ID: {bot.user.id}')
+        
+        try:
+            synced = await bot.tree.sync()
+            logger.info(f"Synced {len(synced)} slash commands globally.")
+        except Exception as e:
+            logger.error(f"Failed to sync slash commands: {e}", exc_info=True)
+
+    await bot.add_cog(Moderation(bot, discrimination_words, discrimination_patterns, nsfw_words, nsfw_patterns))
+
+    try:
+        await bot.start(DISCORD_TOKEN)
+    except discord.LoginFailure:
+        logger.critical("CRITICAL: Invalid Discord token. Check your DISCORD_TOKEN.")
+    except Exception as e:
+        logger.critical(f"CRITICAL: Error during bot startup or runtime: {e}", exc_info=True)
+    finally: 
+        logger.info("Bot shutting down...")
+        if web_server_task:
+            web_server_task.cancel()
+            try:
+                await web_server_task 
+            except asyncio.CancelledError:
+                logger.info("Web server task cancelled successfully.")
+            except Exception as e:
+                logger.error(f"Error during web server task cancellation: {e}", exc_info=True)
+        
+        if runner: 
+            await runner.cleanup()
+            logger.info("Web server runner cleaned up.")
+
+        if http_session and not http_session.closed:
+             await http_session.close() 
+             logger.info("Aiohttp session closed.")
+        if db_conn:
+            await db_conn.close()
+            logger.info("Database connection closed.")
         
 if __name__ == "__main__":
     try:
