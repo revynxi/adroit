@@ -898,8 +898,7 @@ class Moderation(commands.Cog):
                         logger.debug(f"Sightengine response for {media_url}: "
                                      f"Nudity SA: {sexual_activity_score:.2f}, Suggestive: {suggestive_score:.2f}, " # SA stands for Sexual Activity 
                                      f"Gore: {gore_score:.2f}, Violence: {violence_score:.2f}, "
-                                     f"Text Profanity: {text_profanity_score:.2f}, "
-                        
+                                     f"Text Profanity: {text_profanity_score:.2f}, ")
                         is_nsfw = False
                         flagged_reasons = []
 
