@@ -899,7 +899,6 @@ class Moderation(commands.Cog):
                                      f"Nudity SA: {sexual_activity_score:.2f}, Suggestive: {suggestive_score:.2f}, " # SA stands for Sexual Activity 
                                      f"Gore: {gore_score:.2f}, Violence: {violence_score:.2f}, "
                                      f"Text Profanity: {text_profanity_score:.2f}, "
-                                     f"Severe Offensive: {severe_offensive_prob:.2f}, Middle Finger: {middle_finger_score:.2f}")
                         
                         is_nsfw = False
                         flagged_reasons = []
@@ -921,7 +920,7 @@ class Moderation(commands.Cog):
                             flagged_reasons.append(f"Image Text Profanity ({text_profanity_score:.2f})")
                         if offensive_prob > 0.85: 
                             is_nsfw = True
-                            flagged_reasons.append(f"Severe Offensive ({severe_offensive_prob:.2f})")
+                            flagged_reasons.append(f"Severe Offensive ({offensive_prob:.2f})")
                         if is_nsfw:
                             logger.info(f"NSFW media detected by Sightengine: {media_url} (Reasons: {', '.join(flagged_reasons)})")
                             return True
