@@ -593,10 +593,11 @@ class Moderation(commands.Cog):
         self.sightengine_text_profanity_threshold = 0.9  
         self.sightengine_minor_offensive_threshold = 0.95 
 
-        self.discrimination_words = discrimination_words
-        self.discrimination_patterns = discrimination_patterns
-        self.nsfw_words = nsfw_words
-        self.nsfw_patterns = nsfw_patterns
+        self.discrimination_words = load_terms_from_file('discrimination_terms.txt')
+        self.discrimination_patterns = compile_patterns(self.discrimination_words)
+        
+        self.nsfw_words = load_terms_from_file('nsfw_terms.txt')
+        self.nsfw_patterns = compile_patterns(self.nsfw_words)
 
         self.cleanup_message_history.start() 
 
