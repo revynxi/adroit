@@ -4,12 +4,6 @@ import logging
 import os
 import re
 from collections import defaultdict, deque
-from datetime import datetime, timedeltaimport asyncio
-import json
-import logging
-import os
-import re
-from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
@@ -1034,4 +1028,3 @@ if __name__ == "__main__":
         logger.info("⌨️ Bot shutdown initiated by KeyboardInterrupt (Ctrl+C).")
     except Exception as e:
         logger.critical(f"💥 UNHANDLED EXCEPTION IN MAIN RUNNER: {e}", exc_info=True)
-      
