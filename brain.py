@@ -770,7 +770,7 @@ class Moderation(commands.Cog):
         logger.info("Starting temp ban check loop.")
 
 
-   @commands.Cog.listener()
+    @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or message.webhook_id:
             return
