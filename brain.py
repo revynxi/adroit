@@ -14,7 +14,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from discord import app_commands
 from thefuzz import fuzz
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type 
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, wait_random_exponential # Added wait_random_exponential
 
 load_dotenv()
 
@@ -216,7 +216,7 @@ async def log_action(action: str, member_or_user: discord.User | discord.Member,
         logger.info(f"LOG (Guild {current_guild.name}): {action.upper()} applied to {display_name} ({user_id}) for: {reason}") 
         logger.warning(f"Log channel (ID: {log_channel_id}) not found or accessible for guild {current_guild.name}.") 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(client_exceptions.ClientResponseError))
+@retry(stop=stop_after_attempt(5), wait=wait_random_exponential(multiplier=1, min=4, max=60), retry=retry_if_exception_type(client_exceptions.ClientResponseError)) # Modified retry settings
 async def check_openai_moderation(text: str) -> dict:
     """Checks text against the OpenAI moderation API with retries."""
     if not OPENAI_API_KEY:
@@ -1068,7 +1068,7 @@ async def init_db():
         await db_conn.execute('''
             CREATE TABLE IF NOT EXISTS infractions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
+                user_id INTEGER NOT E N
                 guild_id INTEGER NOT NULL,
                 points INTEGER NOT NULL,
                 timestamp TEXT NOT NULL,
