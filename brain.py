@@ -14,7 +14,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from discord import app_commands
 from thefuzz import fuzz
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, wait_random_exponential # Added wait_random_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, wait_random_exponential
 
 load_dotenv()
 
@@ -216,7 +216,7 @@ async def log_action(action: str, member_or_user: discord.User | discord.Member,
         logger.info(f"LOG (Guild {current_guild.name}): {action.upper()} applied to {display_name} ({user_id}) for: {reason}") 
         logger.warning(f"Log channel (ID: {log_channel_id}) not found or accessible for guild {current_guild.name}.") 
 
-@retry(stop=stop_after_attempt(5), wait=wait_random_exponential(multiplier=1, min=4, max=60), retry=retry_if_exception_type(client_exceptions.ClientResponseError)) # Modified retry settings
+@retry(stop=stop_after_attempt(5), wait=wait_random_exponential(multiplier=1, min=4, max=60), retry=retry_if_exception_type(client_exceptions.ClientResponseError))
 async def check_openai_moderation(text: str) -> dict:
     """Checks text against the OpenAI moderation API with retries."""
     if not OPENAI_API_KEY:
@@ -1017,8 +1017,7 @@ async def get_config(
             domains = await get_guild_config(guild_id, "permitted_domains", list(bot_config.permitted_domains))
             await add_field("Permitted Domains", ", ".join(domains) if domains else "None set (using bot defaults)")
         else:
-            embed.description = f"Unknown or invalid setting: `{setting}`."
-            embed.color = discord.Color.red()
+            embed.description = f"Unknown or invalid setting: `{setting}`. Available settings: `log_channel`, `link_channel`, `allowed_languages` (channel-specific), `allowed_topics` (channel-specific), `permitted_domains`."
 
     else:
         log_channel_id = await get_guild_config(guild_id, "log_channel_id", bot_config.default_log_channel_id)
@@ -1068,7 +1067,7 @@ async def init_db():
         await db_conn.execute('''
             CREATE TABLE IF NOT EXISTS infractions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT E N
+                user_id INTEGER NOT NULL,
                 guild_id INTEGER NOT NULL,
                 points INTEGER NOT NULL,
                 timestamp TEXT NOT NULL,
