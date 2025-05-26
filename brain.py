@@ -1068,7 +1068,7 @@ async def init_db():
         await db_conn.execute('''
             CREATE TABLE IF NOT EXISTS infractions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NOT NULL,
+                user_id INTEGER NOT NULL,
                 guild_id INTEGER NOT NULL,
                 points INTEGER NOT NULL,
                 timestamp TEXT NOT NULL,
