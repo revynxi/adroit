@@ -14,7 +14,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from discord import app_commands
 from thefuzz import fuzz
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, wait_random_exponential # Added wait_random_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, wait_random_exponential 
 
 load_dotenv()
 
@@ -216,41 +216,42 @@ async def log_action(action: str, member_or_user: discord.User | discord.Member,
         logger.info(f"LOG (Guild {current_guild.name}): {action.upper()} applied to {display_name} ({user_id}) for: {reason}") 
         logger.warning(f"Log channel (ID: {log_channel_id}) not found or accessible for guild {current_guild.name}.") 
 
-@retry(stop=stop_after_attempt(5), wait=wait_random_exponential(multiplier=1, min=4, max=120), retry=retry_if_exception_type(client_exceptions.ClientResponseError)) # Modified retry settings
+retry(stop=stop_after_attempt(5), wait=wait_random_exponential(multiplier=1, min=4, max=120), retry=retry_if_exception_type(client_exceptions.ClientResponseError)) 
 async def check_openai_moderation(text: str) -> dict:
     """Checks text against the OpenAI moderation API with retries."""
     if not OPENAI_API_KEY:
-        logger.warning("OPENAI_API_KEY not set. Skipping OpenAI moderation check.") 
+        logger.warning("OPENAI_API_KEY not set. Skipping OpenAI moderation check.")
         return {"flagged": False, "categories": {}}
     if not text.strip():
-        return {"flagged": False, "categories": {}} 
+        return {"flagged": False, "categories": {}}
 
-    url = "https://api.openai.com/v1/moderations" 
+    url = "https://api.openai.com/v1/moderations"
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}", 
-        "Content-Type": "application/json" 
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
     }
-    data = {"input": text} 
-
+    data = {"input": text}
     try:
         async with http_session.post(url, headers=headers, json=data, timeout=10) as response:
             response.raise_for_status()
             json_response = await response.json()
-            results_list = json_response.get("results", []) 
+            results_list = json_response.get("results", [])
             if results_list:
                 return results_list[0]
-            logger.warning(f"OpenAI moderation returned empty results list for text: {text[:100]}") 
+            logger.warning(f"OpenAI moderation returned empty results list for text: {text[:100]}")
             return {"flagged": False, "categories": {}}
     except client_exceptions.ClientResponseError as e:
-        if e.status == 400:
-            logger.warning(f"OpenAI moderation API returned 400 Bad Request. Text: '{text[:100]}...' Error: {e.message}") 
+        if e.status == 429:
+            logger.error(f"OpenAI moderation API rate limit hit (429 Too Many Requests). Retrying with backoff. Text: '{text[:100]}...'")
+        elif e.status == 400:
+            logger.warning(f"OpenAI moderation API returned 400 Bad Request. Text: '{text[:100]}...' Error: {e.message}")
             return {"flagged": False, "categories": {}}
-        raise 
+        raise
     except asyncio.TimeoutError:
-        logger.error(f"OpenAI moderation API request timed out after 10 seconds. Text: {text[:100]}") 
+        logger.error(f"OpenAI moderation API request timed out after 10 seconds. Text: {text[:100]}")
         raise
     except Exception as e:
-        logger.error(f"Unexpected error with OpenAI moderation API: {e} for text: {text[:100]}", exc_info=True) 
+        logger.error(f"Unexpected error with OpenAI moderation API: {e} for text: {text[:100]}", exc_info=True)
         return {"flagged": False, "categories": {}}
 
 
