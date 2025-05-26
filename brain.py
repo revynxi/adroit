@@ -1111,8 +1111,8 @@ async def on_ready():
 
     global LANGUAGE_MODEL
     try:
-        LANGUAGE_MODEL = fasttext.load_model(bot_config.FASTTEXT_MODEL_PATH) 
-        logger.info(f"✅ FastText model loaded from {bot_config.FASTTEXT_MODEL_PATH}")
+        LANGUAGE_MODEL = fasttext.load_model(FASTTEXT_MODEL_PATH) 
+        logger.info(f"✅ FastText model loaded from {FASTTEXT_MODEL_PATH}")
     except ValueError as e:
         logger.error(f"❌ Error loading FastText model: {e}. Make sure the model file is valid and accessible.")
         LANGUAGE_MODEL = None
@@ -1126,7 +1126,7 @@ async def on_ready():
         logger.info("✅ Aiohttp ClientSession initialized.")
 
     decay_points.start()
-    bot.add_cog(Moderation(bot))
+    await bot.add_cog(Moderation(bot))
     Moderation(bot).cleanup_rate_limit_data.start() 
 
     try:
