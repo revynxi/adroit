@@ -1039,22 +1039,20 @@ async def get_config(
 
 
 async def init_db():
-    """Initializes the SQLite database and creates tables if they don't exist."""
     global db_conn
     try:
-        db_conn = await aiosqlite.connect('moderation.db')
+        db_conn = await aiosqlite.connect('database.db')
         await db_conn.execute('''
             CREATE TABLE IF NOT EXISTS guild_configs (
-                guild_id INTEGER NOT NULL,
+                guild_id INTEGER PRIMARY KEY,
                 config_key TEXT NOT NULL,
-                config_value TEXT,
-                PRIMARY KEY (guild_id, config_key)
+                config_value TEXT
             )
         ''')
         await db_conn.execute('''
             CREATE TABLE IF NOT EXISTS infractions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT E N
+                user_id INTEGER NOT NULL,
                 guild_id INTEGER NOT NULL,
                 points INTEGER NOT NULL,
                 timestamp TEXT NOT NULL,
@@ -1082,11 +1080,10 @@ async def init_db():
             )
         ''')
         await db_conn.commit()
-        logger.info("✅ Database initialized and tables checked.")
+        logger.info("✅ Database initialized successfully.")
     except Exception as e:
         logger.critical(f"❌ Failed to initialize database: {e}", exc_info=True)
         exit(1)
-
 
 @bot.event
 async def on_ready():
