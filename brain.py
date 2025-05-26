@@ -1198,7 +1198,7 @@ if __name__ == "__main__":
             task.cancel()
         try:
             async def gather_cancelled_tasks(): 
-            wait asyncio.gather(*tasks, return_exceptions=True)
+              wait asyncio.gather(*tasks, return_exceptions=True)
             asyncio.run(gather_cancelled_tasks())
             logger.info("Outstanding tasks cancelled.")
         except RuntimeError as e: 
