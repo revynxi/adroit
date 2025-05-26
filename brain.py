@@ -770,7 +770,7 @@ class Moderation(commands.Cog):
         logger.info("Starting temp ban check loop.")
 
 
-    @commands.Cog.listener()
+   @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or message.webhook_id:
             return
@@ -911,12 +911,17 @@ class Moderation(commands.Cog):
                 break
 
         # --- 6. AI Moderation (OpenAI, Sightengine) ---
-        if OPENAI_API_KEY and cleaned_content:
-            openai_result = await check_openai_moderation_api(cleaned_content)
-            if openai_result.get("flagged"):
-                violations_found.add("openai_flagged")
-                logger.info(f"OpenAI moderation flagged content from {user_id}.")
-                logger.debug(f"OpenAI categories: {openai_result.get('categories')}, scores: {openai_result.get('category_scores')}")
+        # ONLY call OpenAI if no discrimination or NSFW text was found by local checks
+        if not ("discrimination" in violations_found or "nsfw_text" in violations_found):
+            if OPENAI_API_KEY and cleaned_content:
+                openai_result = await check_openai_moderation_api(cleaned_content)
+                if openai_result.get("flagged"):
+                    violations_found.add("openai_flagged")
+                    logger.info(f"OpenAI moderation flagged content from {user_id}.")
+                    logger.debug(f"OpenAI categories: {openai_result.get('categories')}, scores: {openai_result.get('category_scores')}")
+        else:
+            logger.info(f"Skipping OpenAI moderation for {user_id} due to local keyword/phrase match.")
+
 
         # Check attachments with Sightengine
         for attachment in message.attachments:
@@ -995,30 +1000,54 @@ async def on_disconnect():
 async def on_error(event_name, *args, **kwargs):
     """Logs errors that occur in event listeners."""
     logger.error(f"Error in event '{event_name}':", exc_info=True)
-
+  
+async def health_check(request):
+    """Simple health check endpoint for Render."""
+    return web.Response(text="Bot is running!")
 
 async def main_async_runner():
-    """Handles the asynchronous setup and running of the bot."""
-    async with bot:
-        await bot.add_cog(General(bot))
-        await bot.add_cog(Moderation(bot))
-        try:
-            await bot.start(DISCORD_TOKEN)
-        except Exception as e:
-            logger.critical(f"Bot failed to start: {e}", exc_info=True)
-        finally:
-            logger.info("Initiating final cleanup on bot shutdown.")
-            # Close aiohttp session
-            if http_session and not http_session.closed:
-                await http_session.close()
-                logger.info("Aiohttp session closed.")
-            
-            # Close database connection
-            if db_conn:
-                await db_conn.close()
-                logger.info("Database connection closed.")
-            
-            logger.info("✅ Cleanup complete. Adroit Bot is offline.")
+    """Handles the asynchronous setup and running of the bot, including a web server for Render."""
+    global http_session # Ensure http_session is accessible
+
+    # Create an aiohttp web application
+    app = web.Application()
+    app.router.add_get("/", health_check) # Add a health check endpoint
+
+    # Get the port from the environment variable (Render sets this)
+    port = int(os.getenv("PORT", 8080)) # Default to 8080 if not set, though Render will set it
+
+    # Create an aiohttp web server runner
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+
+    # Start both the Discord bot and the web server concurrently
+    discord_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
+    web_server_task = asyncio.create_task(site.start())
+
+    try:
+        logger.info(f"Starting web server on port {port} for Render health checks.")
+        # Wait for both tasks to complete (or for the bot to shut down)
+        await asyncio.gather(discord_task, web_server_task)
+    except Exception as e:
+        logger.critical(f"Bot or web server failed to start: {e}", exc_info=True)
+    finally:
+        logger.info("Initiating final cleanup on bot shutdown.")
+        # Close aiohttp session used by the bot
+        if http_session and not http_session.closed:
+            await http_session.close()
+            logger.info("Aiohttp client session closed.")
+
+        # Clean up web server resources
+        await runner.cleanup()
+        logger.info("Aiohttp web server runner cleaned up.")
+
+        # Close database connection
+        if db_conn:
+            await db_conn.close()
+            logger.info("Database connection closed.")
+
+        logger.info("✅ Cleanup complete. Adroit Bot is offline.")
 
 
 if __name__ == "__main__":
