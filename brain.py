@@ -547,7 +547,14 @@ async def cleanup_and_decay_task():
                         logger.info(f"Automatically unbanned user ID {user_id} from guild {guild.name} ({guild_id}).")
                         
                         # Try to fetch user for richer logging, but don't fail if user is gone
-                        target_user_for_log = await bot.fetch_user(user_id) rescue None 
+                        target_user_for_log = None # Default to None
+                        try:
+                            target_user_for_log = await bot.fetch_user(user_id)
+                        except discord.NotFound:
+                            logger.debug(f"User {user_id} not found via fetch_user in cleanup_and_decay_task, using ID for log.")
+                        except discord.HTTPException as e:
+                            logger.warning(f"HTTP error fetching user {user_id} in cleanup_and_decay_task: {e}. Using ID for log.")
+                        
                         log_reason = f"Temporary ban expired. Original reason: {ban_reason or 'Not specified.'}"
                         await log_moderation_action("unban", target_user_for_log or user_to_unban_obj, log_reason, bot.user, guild, color=discord.Color.green())
                     except discord.NotFound: # Ban not found on Discord's side
