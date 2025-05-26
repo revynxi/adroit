@@ -5,3 +5,5 @@ aiosqlite==0.20.0
 python-dotenv==1.0.1
 luga==0.2.7
 httpx==0.28.1
+tenacity==9.1.2
+thefuzz==0.22.1
