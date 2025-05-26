@@ -1193,7 +1193,7 @@ if __name__ == "__main__":
 
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         if tasks:
-        logger.info(f"Cancelling {len(tasks)} outstanding asyncio tasks...")
+          logger.info(f"Cancelling {len(tasks)} outstanding asyncio tasks...")
         for task in tasks:
             task.cancel()
         try:
