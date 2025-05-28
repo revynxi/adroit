@@ -542,9 +542,6 @@ async def process_infractions_and_punish(
                 await clear_user_infractions(user_id, guild_id, cursor) 
                 await db_conn.commit() 
 
-    except Exception as e:
-        logger.error(f"Error in process_infractions_and_punish for user {user_id} in guild {guild_id}: {e}", exc_info=True)
-
 async def get_user_infractions_from_db(user_id: int, guild_id: int, days_limit: int = 0) -> tuple[list[dict], int]:
     """
     Retrieves infractions for a user, optionally limited by days.
