@@ -1052,6 +1052,8 @@ class ModerationCog(commands.Cog, name="Moderation"):
                             try:
                                 if offensive_data.get("nazi", 0.0) > 0.8 or offensive_data.get("confederate_flag", 0.0) > 0.8:
                                     violations_found_this_message.add("offensive_symbols_media")
+                            except:
+                                pass
                             
                             if violations_found_this_message.intersection({"nsfw_media", "gore_violence_media", "offensive_symbols_media"}):
                                 logger.debug(f"Sightengine Flagged: User {user_id}, Attachment {attachment.filename}. Result: {sightengine_result}")
