@@ -911,25 +911,31 @@ class ModerationCog(commands.Cog, name="Moderation"):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not message.guild or message.author.bot or message.webhook_id:
-            return 
+            return # Ignore DMs, bot messages, and webhook messages
 
+        # Bypass checks for users with manage_messages permission (or configure roles)
         if isinstance(message.author, discord.Member) and message.author.guild_permissions.manage_messages:
-            return await self.bot.process_commands(message) 
+            # logger.debug(f"User {message.author.name} has manage_messages, skipping auto-moderation.")
+            return await self.bot.process_commands(message) # Still process commands for them
 
+        # --- Content Preparation ---
         content_raw = message.content
-        cleaned_content_for_matching = clean_message_content(content_raw)
+        cleaned_content_for_matching = clean_message_content(content_raw) # Lowercase, normalized spaces
         
-        member = message.author 
+        member = message.author # Already know it's a discord.Member due to message.guild check
         guild = message.guild
         channel = message.channel
         user_id = member.id
         guild_id = guild.id
         
-        violations_found_this_message = set() 
+        violations_found_this_message = set() # Store violation type keys
 
+        # --- 1. Spam Detection ---
         now = datetime.now(timezone.utc)
         
+        # Rate-based spam
         self.user_message_timestamps[guild_id][user_id].append(now)
+        # Remove timestamps older than the spam window
         while self.user_message_timestamps[guild_id][user_id] and \
               (now - self.user_message_timestamps[guild_id][user_id][0]).total_seconds() > bot_config.spam_window_seconds:
             self.user_message_timestamps[guild_id][user_id].popleft()
@@ -938,10 +944,11 @@ class ModerationCog(commands.Cog, name="Moderation"):
             violations_found_this_message.add("spam_rate")
             logger.debug(f"Spam (Rate): User {user_id} in guild {guild_id} sent {len(self.user_message_timestamps[guild_id][user_id])} messages in window.")
 
+        # Repetition-based spam (only if not already flagged for rate spam on this message)
         if cleaned_content_for_matching and "spam_rate" not in violations_found_this_message:
             history = self.user_message_history[guild_id][user_id]
             is_repetitive = False
-            if len(history) == bot_config.spam_repetition_history_count: 
+            if len(history) == bot_config.spam_repetition_history_count: # Check only if history is full
                 similar_count = 0
                 for old_msg_cleaned in history:
                     if fuzz.ratio(cleaned_content_for_matching, old_msg_cleaned) >= bot_config.spam_repetition_fuzzy_threshold:
@@ -956,6 +963,7 @@ class ModerationCog(commands.Cog, name="Moderation"):
             
             self.user_message_history[guild_id][user_id].append(cleaned_content_for_matching)
 
+        # --- 2. Forbidden Text and Unpermitted URLs ---
         if bot_config.forbidden_text_pattern.search(content_raw):
             violations_found_this_message.add("advertising_forbidden_text")
             logger.debug(f"Forbidden Text: User {user_id} used forbidden pattern. Content: {content_raw[:100]}")
@@ -977,7 +985,7 @@ class ModerationCog(commands.Cog, name="Moderation"):
                 except Exception as e:
                     logger.warning(f"Error parsing potential URL '{purl}': {e}")
 
-
+        # --- 3. Excessive Mentions / Attachments / Message Length ---
         if len(message.mentions) > bot_config.mention_limit:
             violations_found_this_message.add("excessive_mentions")
         if len(message.attachments) > bot_config.max_attachments:
@@ -985,13 +993,14 @@ class ModerationCog(commands.Cog, name="Moderation"):
         if len(content_raw) > bot_config.max_message_length: 
             violations_found_this_message.add("long_message")
 
+        # --- 4. Language Policy Enforcement ---
         if len(cleaned_content_for_matching.split()) >= bot_config.min_msg_len_for_lang_check and \
            bot_config.has_alphanumeric_pattern.search(cleaned_content_for_matching):
             
             channel_lang_config = await self.get_effective_channel_language_config(guild_id, channel.id)
 
-            if channel_lang_config and "any" not in channel_lang_config:
-                lang_code, confidence = await detect_language_ai(cleaned_content_for_matching) 
+            if channel_lang_config and "any" not in channel_lang_config: 
+                lang_code, confidence = await detect_language_ai(cleaned_content_for_matching)
                 
                 if lang_code and lang_code not in channel_lang_config:
                     is_safe_word = any(safe_word in cleaned_content_for_matching for safe_word in bot_config.common_safe_foreign_words)
@@ -1004,6 +1013,7 @@ class ModerationCog(commands.Cog, name="Moderation"):
                         violations_found_this_message.add("foreign_language")
                         logger.debug(f"Foreign Language: User {user_id}, lang '{lang_code}' (conf: {confidence:.2f}) not in {channel_lang_config} for channel {channel.id}.")
 
+        # --- 5. Keyword/Phrase Matching (Discrimination, NSFW Text) ---
         if any(word in discrimination_words_set for word in cleaned_content_for_matching.split()) or \
            any(fuzz.partial_ratio(phrase, cleaned_content_for_matching) >= bot_config.fuzzy_match_threshold_keywords for phrase in discrimination_phrases):
             violations_found_this_message.add("discrimination")
@@ -1013,13 +1023,13 @@ class ModerationCog(commands.Cog, name="Moderation"):
            any(fuzz.partial_ratio(phrase, cleaned_content_for_matching) >= bot_config.fuzzy_match_threshold_keywords for phrase in nsfw_text_phrases)):
             violations_found_this_message.add("nsfw_text")
         
+        # --- 6. AI Moderation (OpenAI for text, Sightengine for media) ---
         if cleaned_content_for_matching and not ("discrimination" in violations_found_this_message or "nsfw_text" in violations_found_this_message):
             if OPENAI_API_KEY:
                 try:
                     openai_result = await check_openai_moderation_api(content_raw) 
                     if openai_result.get("flagged"):
                         categories = openai_result.get("categories", {})
-
                         if categories.get("harassment", False) or categories.get("harassment/threatening", False) or \
                            categories.get("hate", False) or categories.get("hate/threatening", False) or \
                            categories.get("self-harm", False) or categories.get("self-harm/intent", False) or categories.get("self-harm/instructions", False):
@@ -1049,11 +1059,6 @@ class ModerationCog(commands.Cog, name="Moderation"):
                             offensive_data = sightengine_result.get("offensive", {})
                             if offensive_data.get("prob", 0.0) >= bot_config.sightengine_offensive_symbols_threshold: 
                                 violations_found_this_message.add("offensive_symbols_media")
-                            try:
-                                if offensive_data.get("nazi", 0.0) > 0.8 or offensive_data.get("confederate_flag", 0.0) > 0.8:
-                                    violations_found_this_message.add("offensive_symbols_media")
-                            except:
-                                pass
                             
                             if violations_found_this_message.intersection({"nsfw_media", "gore_violence_media", "offensive_symbols_media"}):
                                 logger.debug(f"Sightengine Flagged: User {user_id}, Attachment {attachment.filename}. Result: {sightengine_result}")
@@ -1065,14 +1070,14 @@ class ModerationCog(commands.Cog, name="Moderation"):
             logger.info(f"User {user_id} ({member.name}) in guild {guild_id} triggered violations: {list(violations_found_this_message)}. Message: {message.jump_url}")
 
             if bot_config.delete_violating_messages:
-                try:
+                try: 
                     await message.delete()
                     logger.info(f"Deleted message {message.id} from user {user_id} due to violations.")
                 except discord.Forbidden:
                     logger.error(f"Failed to delete message {message.id} (user {user_id}): Missing permissions.")
                 except discord.NotFound:
                     logger.warning(f"Failed to delete message {message.id} (user {user_id}): Message already deleted.")
-                except Exception as e:
+                except Exception as e: 
                     logger.error(f"Error deleting message {message.id} (user {user_id}): {e}", exc_info=True)
             
             if bot_config.send_in_channel_warning:
@@ -1088,7 +1093,6 @@ class ModerationCog(commands.Cog, name="Moderation"):
             await process_infractions_and_punish(member, guild, list(violations_found_this_message), content_raw, message.jump_url)
         else:
             await self.bot.process_commands(message)
-
   
     @app_commands.command(name="infractions", description="View a user's recent infractions and active points.")
     @app_commands.default_permissions(manage_messages=True)
