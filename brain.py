@@ -376,7 +376,7 @@ async def check_sightengine_media_api(image_url: str) -> dict:
     except Exception as e:
         logger.error(f"Unexpected error with Sightengine API for URL: {image_url}: {e}", exc_info=True)
         logger.critical(f"Sightengine moderation failed definitively for URL: '{image_url}'. Moderation skipped.")
-        return {} # Fallback
+        return {} 
 
 async def apply_moderation_punishment(
     member: discord.Member,
@@ -911,31 +911,27 @@ class ModerationCog(commands.Cog, name="Moderation"):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not message.guild or message.author.bot or message.webhook_id:
-            return # Ignore DMs, bot messages, and webhook messages
+            return 
 
-        # Bypass checks for users with manage_messages permission (or configure roles)
         if isinstance(message.author, discord.Member) and message.author.guild_permissions.manage_messages:
             # logger.debug(f"User {message.author.name} has manage_messages, skipping auto-moderation.")
-            return await self.bot.process_commands(message) # Still process commands for them
+            return await self.bot.process_commands(message) 
 
-        # --- Content Preparation ---
         content_raw = message.content
-        cleaned_content_for_matching = clean_message_content(content_raw) # Lowercase, normalized spaces
+        cleaned_content_for_matching = clean_message_content(content_raw) 
         
-        member = message.author # Already know it's a discord.Member due to message.guild check
+        member = message.author 
         guild = message.guild
         channel = message.channel
         user_id = member.id
         guild_id = guild.id
         
-        violations_found_this_message = set() # Store violation type keys
+        violations_found_this_message = set() 
 
         # --- 1. Spam Detection ---
         now = datetime.now(timezone.utc)
         
-        # Rate-based spam
         self.user_message_timestamps[guild_id][user_id].append(now)
-        # Remove timestamps older than the spam window
         while self.user_message_timestamps[guild_id][user_id] and \
               (now - self.user_message_timestamps[guild_id][user_id][0]).total_seconds() > bot_config.spam_window_seconds:
             self.user_message_timestamps[guild_id][user_id].popleft()
@@ -944,11 +940,10 @@ class ModerationCog(commands.Cog, name="Moderation"):
             violations_found_this_message.add("spam_rate")
             logger.debug(f"Spam (Rate): User {user_id} in guild {guild_id} sent {len(self.user_message_timestamps[guild_id][user_id])} messages in window.")
 
-        # Repetition-based spam (only if not already flagged for rate spam on this message)
         if cleaned_content_for_matching and "spam_rate" not in violations_found_this_message:
             history = self.user_message_history[guild_id][user_id]
             is_repetitive = False
-            if len(history) == bot_config.spam_repetition_history_count: # Check only if history is full
+            if len(history) == bot_config.spam_repetition_history_count: 
                 similar_count = 0
                 for old_msg_cleaned in history:
                     if fuzz.ratio(cleaned_content_for_matching, old_msg_cleaned) >= bot_config.spam_repetition_fuzzy_threshold:
