@@ -1782,11 +1782,34 @@ async def on_ready():
     logger.info("-" * 40)
 
 async def main_async_runner():
-    """Main function to start the bot and handle graceful shutdown."""
+    app = web.Application()
+    app.router.add_get("/", health_check_handler)
+    app.router.add_get("/health", health_check_handler)
+
+    render_port = os.getenv("PORT")
+    runner = None
+    site = None
+
+    if render_port:
+        try:
+            port = int(render_port)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '0.0.0.0', port)
+            await site.start()
+            logger.info(f"Health check web server started on port {port}.")
+        except Exception as e:
+            logger.error(f"Failed to start health check web server: {e}", exc_info=True)
+    else:
+        logger.info("PORT environment variable not set. Health check web server will not start.")
+
     try:
         await bot.start(DISCORD_TOKEN)
     finally:
-        logger.info("Bot is shutting down...")
+        logger.info("Bot is shutting down.")
+        if runner:
+            await runner.cleanup()
+            logger.info("Web server runner cleaned up.")
         if http_session and not http_session.closed:
             await http_session.close()
             logger.info("Aiohttp ClientSession closed.")
@@ -1794,8 +1817,6 @@ async def main_async_runner():
             await db_conn.close()
             logger.info("Database connection closed.")
         await bot.close()
-        logger.info("Bot has been shut down gracefully.")
-
 
 if __name__ == "__main__":
     try:
