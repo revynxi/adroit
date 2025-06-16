@@ -5,7 +5,7 @@ import os
 import re
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus
 
 import aiosqlite
 import discord
@@ -44,6 +44,12 @@ db_conn: aiosqlite.Connection | None = None
 LANGUAGE_MODEL: fasttext.FastText._FastText | None = None 
 http_session: ClientSession | None = None
 
+dynamic_rules = {
+    "forbidden_words": set(),
+    "forbidden_phrases": [],
+    "forbidden_regex": []
+}
+
 class BotConfig:
     """Holds all static configurations for the bot."""
     def __init__(self):
@@ -57,11 +63,11 @@ class BotConfig:
             1122523546355245126: {"language": ["ru"]}, 
             1122524817904635904: {"language": ["zh"]}, 
             1242768362237595749: {"language": ["es"]} 
-        }
+        } 
         self.forbidden_text_pattern = re.compile(
             r"(discord\.gg/|join\s+our|server\s+invite|free\s+nitro|check\s+out\s+my|follow\s+me|subscribe\s+to|buy\s+now|gift\s+card|giveaway\s+scam)",
             re.IGNORECASE
-        )
+        ) 
         self.url_pattern = re.compile(r"(https?://\S+|www\.\S+|\b\S+\.(com|net|org|io|dev|xyz|gg|app|co|online|shop|site|fun|club|store|live)\b)")
         self.has_alphanumeric_pattern = re.compile(r'[a-zA-Z0-9]')
         self.permitted_domains = [ 
@@ -72,22 +78,22 @@ class BotConfig:
             "wikipedia.org", "wikimedia.org", "twitch.tv", "reddit.com", "x.com", "twitter.com",
             "fxtwitter.com", "vxtwitter.com", "spotify.com", "soundcloud.com",
             "pastebin.com", "hastebin.com", "gist.github.com", "youtube.com", "youtu.be" 
-        ]
+        ] 
         self.punishment_system = {
             "points_thresholds": {
-                5: {"action": "warn", "reason_suffix": "Minor guideline violations.", "dm_message": "This is a formal warning. Please review the server rules carefully. Further violations will lead to stricter actions."},
-                10: {"action": "mute", "duration_hours": 1, "reason_suffix": "Accumulated violations or spam.", "dm_message": "You have been muted for 1 hour due to repeated minor violations or spam. Please adhere to server guidelines upon your return."},
-                20: {"action": "mute", "duration_hours": 6, "reason_suffix": "Significant or repeated violations.", "dm_message": "You have been muted for 6 hours due to significant or repeated violations. Continued disregard for rules will result in a kick or ban."},
-                35: {"action": "kick", "reason_suffix": "Persistent serious violations after warnings/mutes.", "dm_message": "You have been kicked from the server due to persistent serious violations. You may rejoin, but further infractions will likely result in a ban."},
-                50: {"action": "temp_ban", "duration_days": 3, "reason_suffix": "Severe or multiple major violations.", "dm_message": "You have been temporarily banned for 3 days due to severe or multiple major violations. Consider this a serious warning."},
-                75: {"action": "temp_ban", "duration_days": 30, "reason_suffix": "Extreme or highly disruptive behavior.", "dm_message": "You have been temporarily banned for 30 days due to extreme or highly disruptive behavior. Any further issues after this ban may lead to a permanent ban."},
+                5: {"action": "warn", "reason_suffix": "Minor guideline violations.", "dm_message": "This is a formal warning. Please review the server rules carefully. Further violations will lead to stricter actions."}, 
+                10: {"action": "mute", "duration_hours": 1, "reason_suffix": "Accumulated violations or spam.", "dm_message": "You have been muted for 1 hour due to repeated minor violations or spam. Please adhere to server guidelines upon your return."}, 
+                20: {"action": "mute", "duration_hours": 6, "reason_suffix": "Significant or repeated violations.", "dm_message": "You have been muted for 6 hours due to significant or repeated violations. Continued disregard for rules will result in a kick or ban."}, 
+                35: {"action": "kick", "reason_suffix": "Persistent serious violations after warnings/mutes.", "dm_message": "You have been kicked from the server due to persistent serious violations. You may rejoin, but further infractions will likely result in a ban."}, 
+                50: {"action": "temp_ban", "duration_days": 3, "reason_suffix": "Severe or multiple major violations.", "dm_message": "You have been temporarily banned for 3 days due to severe or multiple major violations. Consider this a serious warning."}, 
+                75: {"action": "temp_ban", "duration_days": 30, "reason_suffix": "Extreme or highly disruptive behavior.", "dm_message": "You have been temporarily banned for 30 days due to extreme or highly disruptive behavior. Any further issues after this ban may lead to a permanent ban."}, 
                 100: {"action": "ban", "reason_suffix": "Egregious violations, repeat offenses after temp ban, or admin discretion.", "dm_message": "You have been permanently banned from the server due to egregious violations or continued disregard for server rules after previous sanctions."}
             },
             "violations": { 
-                "discrimination": {"points": 2, "severity": "Low"},
-                "spam_rate": {"points": 2, "severity": "Low"},
-                "spam_repetition": {"points": 3, "severity": "Medium"}, 
-                "nsfw_text": {"points": 2, "severity": "Low"},
+                "discrimination": {"points": 1, "severity": "Low"},
+                "spam_rate": {"points": 1, "severity": "Low"},
+                "spam_repetition": {"points": 1, "severity": "Low"}, 
+                "nsfw_text": {"points": 1, "severity": "Low"},
                 "nsfw_media": {"points": 5, "severity": "High"},
                 "advertising_forbidden_text": {"points": 2, "severity": "Low"},
                 "advertising_unpermitted_url": {"points": 2, "severity": "Low"},
@@ -100,31 +106,32 @@ class BotConfig:
                 "excessive_attachments": {"points": 1, "severity": "Low"},
                 "long_message": {"points": 1, "severity": "Low"}, 
                 "gore_violence_media": {"points": 5, "severity": "High"},
-                "offensive_symbols_media": {"points": 4, "severity": "Medimum"}
-            }
+                "offensive_symbols_media": {"points": 3, "severity": "Medimum"}
+            } 
         }
         self.spam_window_seconds = 10
         self.spam_message_limit = 5 
         self.spam_repetition_history_count = 3
         self.spam_repetition_fuzzy_threshold = 85 
-        self.mention_limit = 7 
+        self.mention_limit = 5 
         self.max_message_length = 1500 
         self.max_attachments = 5
         self.min_msg_len_for_lang_check = 5
-        self.min_confidence_for_lang_flagging = 0.70 
-        self.min_confidence_short_msg_lang = 0.80 
-        self.short_msg_threshold_lang = 25
-        self.common_safe_foreign_words = {"bonjour", "hola", "merci", "gracias", "oui", "si", "nyet", "da", "salut", "ciao", "hallo", "guten tag", "privet", "konnichiwa", "arigato", "sawasdee", "namaste"}
-        self.fuzzy_match_threshold_keywords = 88 
+      
+        self.min_confidence_for_lang_flagging = 0.65 
+        self.min_confidence_short_msg_lang = 0.75 
 
+        self.short_msg_threshold_lang = 25
+        self.common_safe_foreign_words = {"bonjour", "hola", "merci", "gracias", "oui", "si", "nyet", "da", "salut", "ciao", "hallo", "guten tag", "privet", "konnichiwa", "arigato", "sawasdee", "namaste", "scheiße", "scheisse"}
+        self.fuzzy_match_threshold_keywords = 88 
         self.sightengine_nudity_sexual_activity_threshold = 0.6 
         self.sightengine_nudity_suggestive_threshold = 0.8 
         self.sightengine_gore_threshold = 0.7 
         self.sightengine_offensive_symbols_threshold = 0.85 
-
         self.delete_violating_messages = True
         self.send_in_channel_warning = True
-        self.in_channel_warning_delete_delay = 20 
+        self.in_channel_warning_delete_delay = 30 
+        self.proactive_flagging_openai_threshold = 0.75
 
 bot_config = BotConfig()
 
@@ -295,11 +302,12 @@ def retry_if_api_error(exception):
 
 
 @retry(
-    stop=stop_after_attempt(4), 
-    wait=wait_random_exponential(multiplier=1, min=3, max=60), 
+    stop=stop_after_attempt(3),
+    wait=wait_random_exponential(multiplier=1, min=2, max=20), 
     retry=retry_if_api_error,
-    reraise=True 
+    reraise=True
 )
+
 async def check_openai_moderation_api(text_content: str) -> dict:
     """Checks text against the OpenAI moderation API with robust retries."""
     if not OPENAI_API_KEY:
@@ -345,10 +353,11 @@ async def check_openai_moderation_api(text_content: str) -> dict:
     retry=retry_if_api_error,
     reraise=True
 )
+
 async def check_sightengine_media_api(image_url: str) -> dict:
     """Checks image against Sightengine API for moderation flags."""
     if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
-        logger.debug("Sightengine API keys not set. Skipping image moderation.")
+        logger.debug("Sightengine API keys not set. Skipping image moderation.") 
         return {} 
 
     if not http_session or http_session.closed:
@@ -356,19 +365,21 @@ async def check_sightengine_media_api(image_url: str) -> dict:
         return {}
 
     models = "nudity-2.0,gore,offensive,properties,text-content" 
-    url = f"https://api.sightengine.com/1.0/check.json?url={image_url}&models={models}&api_user={SIGHTENGINE_API_USER}&api_secret={SIGHTENGINE_API_SECRET}"
+    
+    encoded_url = quote_plus(image_url)
+    url = f"https://api.sightengine.com/1.0/check.json?url={encoded_url}&models={models}&api_user={SIGHTENGINE_API_USER}&api_secret={SIGHTENGINE_API_SECRET}"
     
     try:
         async with http_session.get(url, timeout=20) as response: 
             response.raise_for_status()
-            json_response = await response.json()
+            json_response = await response.json() 
             if json_response.get("status") == "success":
                 return json_response
             else:
                 logger.warning(f"Sightengine API returned non-success status: {json_response.get('status')} - {json_response.get('error', {}).get('message')} for URL: {image_url}")
                 return {} 
     except client_exceptions.ClientResponseError as e:
-        logger.error(f"Sightengine API error: {e.status} - {e.message} for URL: {image_url}. Retrying if applicable.")
+        logger.error(f"Sightengine API error: {e.status} - {e.message} for URL: {image_url}. Retrying if applicable.") 
         raise
     except asyncio.TimeoutError:
         logger.error(f"Sightengine API request timed out for URL: {image_url}...")
@@ -646,31 +657,84 @@ async def setup_db():
                 guild_id INTEGER NOT NULL,
                 violation_type TEXT NOT NULL,
                 points INTEGER NOT NULL,
-                message_content_snippet TEXT, -- Store a snippet of the message
-                message_url TEXT,             -- Link to the message if available
-                timestamp TEXT NOT NULL       -- ISO format UTC timestamp
+                message_content_snippet TEXT,
+                message_url TEXT,
+                timestamp TEXT NOT NULL
             )
         """)
         await db_conn.execute('CREATE INDEX IF NOT EXISTS idx_infractions_user_guild_time ON infractions (user_id, guild_id, timestamp)')
-
         await db_conn.execute("""
             CREATE TABLE IF NOT EXISTS temp_bans (
                 user_id INTEGER NOT NULL,
                 guild_id INTEGER NOT NULL,
-                unban_time TEXT NOT NULL,    -- ISO format UTC timestamp for when to unban
+                unban_time TEXT NOT NULL,
                 ban_reason TEXT,
-                PRIMARY KEY (user_id, guild_id) -- User can only have one active temp ban per guild
+                PRIMARY KEY (user_id, guild_id)
             )
         """)
         await db_conn.execute('CREATE INDEX IF NOT EXISTS idx_temp_bans_unban_time ON temp_bans (unban_time)')
-        
+
+        await db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS dynamic_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                rule_type TEXT NOT NULL, -- 'forbidden_word', 'forbidden_phrase', 'forbidden_regex'
+                pattern TEXT NOT NULL,
+                added_by_id INTEGER NOT NULL,
+                timestamp TEXT NOT NULL
+            )
+        """)
+        await db_conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_dynamic_rules_guild_type_pattern ON dynamic_rules (guild_id, rule_type, pattern)')
+
+        await db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS review_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                message_content TEXT NOT NULL,
+                reason TEXT NOT NULL, -- e.g., 'Proactive OpenAI Flag'
+                timestamp TEXT NOT NULL
+            )
+        """)
+        await db_conn.execute('CREATE INDEX IF NOT EXISTS idx_review_queue_guild_timestamp ON review_queue (guild_id, timestamp)')
+
         await db_conn.commit()
-        logger.info("Database initialized and tables checked/created successfully.")
+        logger.info("Database initialized and tables (including ML components) checked/created successfully.")
     except Exception as e:
         logger.critical(f"Failed to connect to or initialize database: {e}", exc_info=True)
         if db_conn: await db_conn.close() 
-        exit(1) 
+        exit(1)
 
+async def load_dynamic_rules_from_db():
+    """Loads all dynamic rules from the database into memory."""
+    if not db_conn:
+        logger.error("Cannot load dynamic rules: Database connection not available.")
+        return
+    
+    dynamic_rules["forbidden_words"].clear()
+    dynamic_rules["forbidden_phrases"].clear()
+    dynamic_rules["forbidden_regex"] = []
+
+    try:
+        async with db_conn.execute("SELECT rule_type, pattern FROM dynamic_rules") as cursor:
+            rows = await cursor.fetchall()
+            for rule_type, pattern in rows:
+                if rule_type == 'forbidden_word':
+                    dynamic_rules["forbidden_words"].add(pattern.lower())
+                elif rule_type == 'forbidden_phrase':
+                    dynamic_rules["forbidden_phrases"].append(pattern.lower())
+                elif rule_type == 'forbidden_regex':
+                    try:
+                        dynamic_rules["forbidden_regex"].append(re.compile(pattern, re.IGNORECASE))
+                    except re.error as e:
+                        logger.error(f"Failed to compile regex from DB: '{pattern}'. Error: {e}")
+            logger.info(f"Loaded {len(dynamic_rules['forbidden_words'])} words, "
+                        f"{len(dynamic_rules['forbidden_phrases'])} phrases, and "
+                        f"{len(dynamic_rules['forbidden_regex'])} regex patterns from dynamic rules.")
+    except Exception as e:
+        logger.error(f"Error loading dynamic rules from database: {e}", exc_info=True)
 
 class GeneralCog(commands.Cog, name="General"):
     def __init__(self, bot: commands.Bot):
@@ -791,6 +855,8 @@ class ModerationCog(commands.Cog, name="Moderation"):
         self.user_message_history: defaultdict[int, defaultdict[int, deque]] = defaultdict(
             lambda: defaultdict(lambda: deque(maxlen=bot_config.spam_repetition_history_count))
         )
+        self.openai_cooldowns: defaultdict[int, float] = defaultdict(float)
+
         self.temp_ban_check_task.start()
         self.cleanup_old_infractions_task.start()
         self.cleanup_spam_trackers_task.start()
@@ -913,6 +979,23 @@ class ModerationCog(commands.Cog, name="Moderation"):
         if not message.guild or message.author.bot or message.webhook_id:
             return 
 
+        cleaned_content_for_matching = clean_message_content(message.content)
+        violations_found_this_message = set()
+
+        for pattern_re in dynamic_rules["forbidden_regex"]:
+            if pattern_re.search(message.content):
+                violations_found_this_message.add("dynamic_rule_violation")
+                logger.debug(f"Dynamic Regex Violation: User {message.author.id}, pattern '{pattern_re.pattern}'")
+                break
+        
+        if not violations_found_this_message:
+            words_in_message = set(cleaned_content_for_matching.split())
+            if any(word in dynamic_rules["forbidden_words"] for word in words_in_message):
+                violations_found_this_message.add("dynamic_rule_violation")
+
+            if not violations_found_this_message and any(phrase in cleaned_content_for_matching for phrase in dynamic_rules["forbidden_phrases"]):
+                 violations_found_this_message.add("dynamic_rule_violation")
+
         if isinstance(message.author, discord.Member) and message.author.guild_permissions.manage_messages:
             # logger.debug(f"User {message.author.name} has manage_messages, skipping auto-moderation.")
             return await self.bot.process_commands(message) 
@@ -1019,12 +1102,18 @@ class ModerationCog(commands.Cog, name="Moderation"):
             violations_found_this_message.add("nsfw_text")
         
         # --- 6. AI Moderation (OpenAI for text, Sightengine for media) ---
-        if cleaned_content_for_matching and not ("discrimination" in violations_found_this_message or "nsfw_text" in violations_found_this_message):
+        proactive_flag_reason = None
+        if cleaned_content_for_matching and not violations_found_this_message:
             if OPENAI_API_KEY:
-                try:
-                    openai_result = await check_openai_moderation_api(content_raw) 
-                    if openai_result.get("flagged"):
-                        categories = openai_result.get("categories", {})
+                now_ts = datetime.now(timezone.utc).timestamp()
+                user_cooldown = self.openai_cooldowns.get(user_id, 0)
+                
+                if now_ts > user_cooldown:
+                    self.openai_cooldowns[user_id] = now_ts + 10 
+                    try:
+                        openai_result = await check_openai_moderation_api(content_raw)
+                        if openai_result.get("flagged"):
+                            categories = openai_result.get("categories", {}) 
                         if categories.get("harassment", False) or categories.get("harassment/threatening", False) or \
                            categories.get("hate", False) or categories.get("hate/threatening", False) or \
                            categories.get("self-harm", False) or categories.get("self-harm/intent", False) or categories.get("self-harm/instructions", False):
@@ -1034,10 +1123,14 @@ class ModerationCog(commands.Cog, name="Moderation"):
                         elif categories.get("violence", False) or categories.get("violence/graphic", False):
                              violations_found_this_message.add("openai_flagged_severe")
                         else: 
-                            violations_found_this_message.add("openai_flagged_moderate")
-                        logger.debug(f"OpenAI Flagged: User {user_id}. Categories: {categories}. Scores: {openai_result.get('category_scores')}")
+                            category_scores = openai_result.get("category_scores", {})
+                            highest_score = max(category_scores.values()) if category_scores else 0
+                            if highest_score >= bot_config.proactive_flagging_openai_threshold:
+                                proactive_flag_reason = f"Proactive OpenAI Flag (Score: {highest_score:.2f})"
                 except Exception as e: 
                     logger.error(f"OpenAI moderation call failed after retries for user {user_id}: {e}")
+              else:
+                    logger.debug(f"OpenAI check for user {user_id} skipped due to active cooldown.")
 
         for attachment in message.attachments:
             if attachment.content_type and (attachment.content_type.startswith("image/") or attachment.content_type.startswith("video/")):
@@ -1086,6 +1179,24 @@ class ModerationCog(commands.Cog, name="Moderation"):
                     logger.error(f"Error sending in-channel warning to {channel.id}: {e}", exc_info=True)
 
             await process_infractions_and_punish(member, guild, list(violations_found_this_message), content_raw, message.jump_url)
+        elif proactive_flag_reason and db_conn:
+            try:
+                async with db_conn.cursor() as cursor:
+                    await cursor.execute("SELECT id FROM review_queue WHERE message_id = ?", (message.id,))
+                    if await cursor.fetchone() is None:
+                        await cursor.execute(
+                            "INSERT INTO review_queue (guild_id, user_id, channel_id, message_id, message_content, reason, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (message.guild.id, message.author.id, message.channel.id, message.id, message.content, proactive_flag_reason, datetime.now(timezone.utc).isoformat())
+                        )
+                        await db_conn.commit()
+                        logger.info(f"Message {message.id} from user {message.author.id} added to review queue. Reason: {proactive_flag_reason}")
+                        review_channel_id = await get_guild_config(message.guild.id, "review_channel_id", bot_config.default_review_channel_id)
+                        review_channel = self.bot.get_channel(review_channel_id)
+                        if review_channel:
+                            await review_channel.send(f"A new message has been flagged for review. Use `/review` to see it. Reason: **{proactive_flag_reason}**")
+
+            except Exception as e:
+                logger.error(f"Failed to add message {message.id} to review queue: {e}", exc_info=True)
         else:
             await self.bot.process_commands(message)
   
@@ -1313,6 +1424,119 @@ class ModerationCog(commands.Cog, name="Moderation"):
             await interaction.response.send_message("An unexpected error occurred during unban.", ephemeral=True)
             logger.error(f"Error in manual_unban for user ID {uid}: {e}", exc_info=True)
 
+    @app_commands.command(name="review", description="Review the oldest message in the moderation queue.")
+    @app_commands.default_permissions(manage_messages=True)
+    async def review_command(self, interaction: discord.Interaction):
+        if not interaction.guild_id or not db_conn:
+            await interaction.response.send_message("This command can only be used in a server with the database active.", ephemeral=True)
+            return
+
+        async with db_conn.execute("SELECT id, user_id, channel_id, message_id, message_content, reason, timestamp FROM review_queue WHERE guild_id = ? ORDER BY timestamp ASC LIMIT 1", (interaction.guild_id,)) as cursor:
+            item = await cursor.fetchone()
+
+        if not item:
+            await interaction.response.send_message("The moderation review queue is empty. Great job!", ephemeral=True)
+            return
+
+        review_id, user_id, channel_id, message_id, content, reason, timestamp = item
+        user = interaction.guild.get_member(user_id) or f"User ID: {user_id}"
+        channel = interaction.guild.get_channel(channel_id) or f"Channel ID: {channel_id}"
+        message_url = f"https://discord.com/channels/{interaction.guild_id}/{channel_id}/{message_id}"
+
+        embed = discord.Embed(
+            title="Moderation Review Required",
+            description=f"**Reason for Flag:** {reason}",
+            color=discord.Color.orange(),
+            timestamp=datetime.fromisoformat(timestamp)
+        )
+        embed.add_field(name="Author", value=f"{user.mention if isinstance(user, discord.Member) else user}", inline=True)
+        embed.add_field(name="Channel", value=f"{channel.mention if isinstance(channel, discord.TextChannel) else channel}", inline=True)
+        embed.add_field(name="Message", value=f"[Jump to Message]({message_url})", inline=False)
+        embed.add_field(name="Content", value=f"```{discord.utils.escape_markdown(content[:1000])}```", inline=False)
+        embed.set_footer(text=f"Review Item ID: {review_id}")
+
+        view = ReviewActionView(review_id=review_id, member=interaction.guild.get_member(user_id))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+class AddRuleModal(discord.ui.Modal, title="Add New Violation Rule"):
+    def __init__(self, review_id: int):
+        super().__init__()
+        self.review_id = review_id
+
+    rule_type = discord.ui.Select(
+        placeholder="Choose the type of rule to add...",
+        options=[
+            discord.SelectOption(label="Forbidden Word", value="forbidden_word", description="A single word that is not allowed."),
+            discord.SelectOption(label="Forbidden Phrase", value="forbidden_phrase", description="A sequence of words that is not allowed."),
+            discord.SelectOption(label="Forbidden Regex", value="forbidden_regex", description="A regular expression pattern to match against."),
+        ]
+    )
+    pattern = discord.ui.TextInput(label="Pattern", style=discord.TextStyle.short, placeholder="Enter the word, phrase, or regex pattern here.")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not db_conn:
+            await interaction.response.send_message("Database connection error.", ephemeral=True)
+            return
+        
+        rule_type_val = self.rule_type.values[0]
+        pattern_val = self.pattern.value.strip()
+
+        if rule_type_val == 'forbidden_regex':
+            try:
+                re.compile(pattern_val)
+            except re.error as e:
+                await interaction.response.send_message(f"Invalid Regular Expression: `{e}`. Please try again.", ephemeral=True)
+                return
+
+        try:
+            async with db_conn.cursor() as cursor:
+                await cursor.execute(
+                    "INSERT INTO dynamic_rules (guild_id, rule_type, pattern, added_by_id, timestamp) VALUES (?, ?, ?, ?, ?)",
+                    (interaction.guild_id, rule_type_val, pattern_val, interaction.user.id, datetime.now(timezone.utc).isoformat())
+                )
+                await cursor.execute("DELETE FROM review_queue WHERE id = ?", (self.review_id,))
+                await db_conn.commit()
+            
+            await load_dynamic_rules_from_db()
+
+            await interaction.response.send_message(f"✅ Rule added and review item `{self.review_id}` closed. The bot is now enforcing this new rule.", ephemeral=True)
+            await log_moderation_action("dynamic_rule_added", interaction.user, f"Added new `{rule_type_val}` rule: `{pattern_val}`", guild=interaction.guild, color=discord.Color.blue())
+
+        except Exception as e:
+            await interaction.response.send_message(f"An error occurred while adding the rule: {e}", ephemeral=True)
+            logger.error(f"Error adding dynamic rule: {e}", exc_info=True)
+
+
+class ReviewActionView(discord.ui.View):
+    def __init__(self, review_id: int, member: discord.Member | None):
+        super().__init__(timeout=300)
+        self.review_id = review_id
+        self.member = member
+        if not member:
+            self.punish_and_add_rule.disabled = True
+
+    @discord.ui.button(label="Approve & Add Rule", style=discord.ButtonStyle.danger, emoji="🔨")
+    async def punish_and_add_rule(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = AddRuleModal(review_id=self.review_id)
+        await interaction.response.send_modal(modal)
+        
+    @discord.ui.button(label="Reject (Safe)", style=discord.ButtonStyle.success, emoji="✅")
+    async def reject_as_safe(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not db_conn:
+            await interaction.response.send_message("Database connection error.", ephemeral=True)
+            return
+        try:
+            await db_conn.execute("DELETE FROM review_queue WHERE id = ?", (self.review_id,))
+            await db_conn.commit()
+            await interaction.response.send_message(f"✅ Review item `{self.review_id}` marked as safe and removed from queue.", ephemeral=True)
+            self.stop()
+        except Exception as e:
+            await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def ignore_item(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("This review item has been ignored for now. It will remain in the queue.", ephemeral=True)
+        self.stop()
 
 @bot.event
 async def on_ready():
@@ -1331,9 +1555,9 @@ async def on_ready():
         try:
             if os.path.exists(FASTTEXT_MODEL_PATH):
                 LANGUAGE_MODEL = fasttext.load_model(FASTTEXT_MODEL_PATH)
-                logger.info(f"FastText model loaded from {FASTTEXT_MODEL_PATH}")
+                logger.info(f"FastText model loaded from {FASTTEXT_MODEL_PATH}") 
             else:
-                logger.error(f"FastText model file not found at {FASTTEXT_MODEL_PATH}. Language detection will be disabled.")
+                logger.error(f"FastText model file not found at {FASTTEXT_MODEL_PATH}.") 
                 LANGUAGE_MODEL = None
         except Exception as e: 
             logger.critical(f"Failed to load FastText model: {e}. Language detection will be disabled.", exc_info=True)
@@ -1341,6 +1565,8 @@ async def on_ready():
 
     if not db_conn:
         await setup_db() 
+
+    await load_dynamic_rules_from_db()
 
     await bot.add_cog(GeneralCog(bot))
     await bot.add_cog(ConfigurationCog(bot))
@@ -1412,6 +1638,8 @@ async def main_async_runner():
     if not db_conn: 
         logger.critical("DB connection failed to establish in main_async_runner. Bot cannot start.")
         return
+
+    await load_dynamic_rules_from_db()
 
     app = web.Application()
     app.router.add_get("/", health_check_handler) 
