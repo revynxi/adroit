@@ -1,3 +1,4 @@
+import math
 import asyncio
 import json
 import logging
@@ -54,6 +55,7 @@ class BotConfig:
     """Holds all static configurations for the bot."""
     def __init__(self):
         self.default_log_channel_id = 1113377818424922132
+        self.default_review_channel_id = 1113377818424922132 
         self.default_channel_configs = { 
             1113377809440722974: {"language": ["en"]},
             1322517478365990984: {"language": ["en"], "topics": ["politics"]}, 
@@ -124,14 +126,14 @@ class BotConfig:
         self.short_msg_threshold_lang = 25
         self.common_safe_foreign_words = {"bonjour", "hola", "merci", "gracias", "oui", "si", "nyet", "da", "salut", "ciao", "hallo", "guten tag", "privet", "konnichiwa", "arigato", "sawasdee", "namaste", "scheiße", "scheisse"}
         self.fuzzy_match_threshold_keywords = 88 
-        self.sightengine_nudity_sexual_activity_threshold = 0.6 
-        self.sightengine_nudity_suggestive_threshold = 0.8 
-        self.sightengine_gore_threshold = 0.7 
-        self.sightengine_offensive_symbols_threshold = 0.85 
+        self.sightengine_nudity_sexual_activity_threshold = 0.5 
+        self.sightengine_nudity_suggestive_threshold = 0.6 
+        self.sightengine_gore_threshold = 0.5 
+        self.sightengine_offensive_symbols_threshold = 0.5
         self.delete_violating_messages = True
         self.send_in_channel_warning = True
         self.in_channel_warning_delete_delay = 30 
-        self.proactive_flagging_openai_threshold = 0.75
+        self.proactive_flagging_openai_threshold = 0.65
 
 bot_config = BotConfig()
 
@@ -1627,7 +1629,13 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
 
 async def health_check_handler(request):
     """Simple health check endpoint."""
-    status_text = f"{bot.user.name} is running! Latency: {round(bot.latency * 1000)}ms. DB: {'OK' if db_conn else 'Error'}. LangModel: {'OK' if LANGUAGE_MODEL else 'Error'}."
+    if math.isinf(bot.latency):
+        latency_str = "∞" 
+    else:
+        latency_str = f"{round(bot.latency * 1000)}"
+
+    status_text = f"{bot.user.name} is running! Latency: {latency_str}ms. DB: {'OK' if db_conn else 'Error'}. LangModel: {'OK' if LANGUAGE_MODEL else 'Error'}."
+
     return web.Response(text=status_text, content_type="text/plain")
 
 async def main_async_runner():
