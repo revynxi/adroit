@@ -1095,60 +1095,229 @@ class ModerationCog(commands.Cog, name="Moderation"):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """The main entry point for all message-based moderation."""
-        if not message.guild or message.author.bot or not isinstance(message.author, discord.Member):
-            return
+        if not message.guild or message.author.bot or message.webhook_id:
+            return 
 
-        if message.author.guild_permissions.manage_messages:
-            return
+        cleaned_content_for_matching = clean_message_content(message.content)
+        violations_found_this_message = set()
+
+        for pattern_re in dynamic_rules["forbidden_regex"]:
+            if pattern_re.search(message.content):
+                violations_found_this_message.add("dynamic_rule_violation")
+                logger.debug(f"Dynamic Regex Violation: User {message.author.id}, pattern '{pattern_re.pattern}'")
+                break
+        
+        if not violations_found_this_message:
+            words_in_message = set(cleaned_content_for_matching.split())
+            if any(word in dynamic_rules["forbidden_words"] for word in words_in_message):
+                violations_found_this_message.add("dynamic_rule_violation")
+
+            if not violations_found_this_message and any(phrase in cleaned_content_for_matching for phrase in dynamic_rules["forbidden_phrases"]):
+                 violations_found_this_message.add("dynamic_rule_violation")
+
+        if isinstance(message.author, discord.Member) and message.author.guild_permissions.manage_messages:
+            return await self.bot.process_commands(message) 
 
         content_raw = message.content
-        cleaned_content = clean_message_content(content_raw)
-        member, guild, channel = message.author, message.guild, message.channel
+        cleaned_content_for_matching = clean_message_content(content_raw) 
         
-        violations = set()
+        member = message.author 
+        guild = message.guild
+        channel = message.channel
+        user_id = member.id
+        guild_id = guild.id
+        
+        violations_found_this_message = set() 
+      
+        # --- 1. Spam Detection ---
+        now = datetime.now(timezone.utc)
+        
+        self.user_message_timestamps[guild_id][user_id].append(now)
+        while self.user_message_timestamps[guild_id][user_id] and \
+              (now - self.user_message_timestamps[guild_id][user_id][0]).total_seconds() > bot_config.spam_window_seconds:
+            self.user_message_timestamps[guild_id][user_id].popleft()
 
-        violations.update(await self.check_language(guild.id, channel.id, content_raw))
-        violations.update(self.check_dynamic_rules(content_raw, cleaned_content))
-        violations.update(self.check_spam(member.id, guild.id, cleaned_content))
-        violations.update(self.check_advertising(content_raw))
-        violations.update(self.check_message_limits(message))
-        violations.update(self.check_keyword_violations(cleaned_content))
+        if len(self.user_message_timestamps[guild_id][user_id]) > bot_config.spam_message_limit:
+            violations_found_this_message.add("spam_rate")
+            logger.debug(f"Spam (Rate): User {user_id} in guild {guild_id} sent {len(self.user_message_timestamps[guild_id][user_id])} messages in window.")
+
+        if cleaned_content_for_matching and "spam_rate" not in violations_found_this_message:
+            history = self.user_message_history[guild_id][user_id]
+            is_repetitive = False
+            if len(history) == bot_config.spam_repetition_history_count: 
+                similar_count = 0
+                for old_msg_cleaned in history:
+                    if fuzz.ratio(cleaned_content_for_matching, old_msg_cleaned) >= bot_config.spam_repetition_fuzzy_threshold:
+                        similar_count += 1
+                if similar_count >= bot_config.spam_repetition_history_count -1 : 
+                    is_repetitive = True
+            
+            if is_repetitive:
+                violations_found_this_message.add("spam_repetition")
+                logger.debug(f"Spam (Repetition): User {user_id} in guild {guild_id} sent repetitive messages.")
+                self.user_message_history[guild_id][user_id].clear() 
+            
+            self.user_message_history[guild_id][user_id].append(cleaned_content_for_matching)
+
+        # --- 2. Forbidden Text and Unpermitted URLs ---
+        if bot_config.forbidden_text_pattern.search(content_raw):
+            violations_found_this_message.add("advertising_forbidden_text")
+            logger.debug(f"Forbidden Text: User {user_id} used forbidden pattern. Content: {content_raw[:100]}")
+
+        if "advertising_forbidden_text" not in violations_found_this_message:
+            potential_urls = re.findall(r"(?:https?://)?(?:www\.)?[\w\.-]+\.\w{2,}(?:/[\S]*)?", content_raw, re.IGNORECASE)
+            guild_permitted_domains = await get_guild_config(guild_id, "permitted_domains", bot_config.permitted_domains)
+
+            for purl in potential_urls:
+                try:
+                    schemed_url = purl if purl.startswith(('http://', 'https://')) else 'http://' + purl
+                    parsed_url = urlparse(schemed_url)
+                    domain = parsed_url.netloc.lower().lstrip('www.')
+                    
+                    if domain and not any(allowed_domain == domain or domain.endswith('.' + allowed_domain) for allowed_domain in guild_permitted_domains):
+                        violations_found_this_message.add("advertising_unpermitted_url")
+                        logger.debug(f"Unpermitted URL: User {user_id} posted URL with domain '{domain}'.")
+                        break 
+                except Exception as e:
+                    logger.warning(f"Error parsing potential URL '{purl}': {e}")
+
+        # --- 3. Excessive Mentions / Attachments / Message Length ---
+        if len(message.mentions) > bot_config.mention_limit:
+            violations_found_this_message.add("excessive_mentions")
+        if len(message.attachments) > bot_config.max_attachments:
+            violations_found_this_message.add("excessive_attachments")
+        if len(content_raw) > bot_config.max_message_length: 
+            violations_found_this_message.add("long_message")
+
+        # --- 4. Language Policy Enforcement ---
+        if len(cleaned_content_for_matching.split()) >= bot_config.min_msg_len_for_lang_check and \
+           bot_config.has_alphanumeric_pattern.search(cleaned_content_for_matching):
+            
+            channel_lang_config = await self.get_effective_channel_language_config(guild_id, channel.id)
+
+            if channel_lang_config and "any" not in channel_lang_config: 
+                lang_code, confidence = await detect_language_ai(cleaned_content_for_matching)
+                
+                if lang_code and lang_code not in channel_lang_config:
+                    is_safe_word = any(safe_word in cleaned_content_for_matching for safe_word in bot_config.common_safe_foreign_words)
+                    
+                    current_confidence_threshold = bot_config.min_confidence_for_lang_flagging
+                    if len(cleaned_content_for_matching) < bot_config.short_msg_threshold_lang:
+                        current_confidence_threshold = bot_config.min_confidence_short_msg_lang
+
+                    if not is_safe_word and confidence >= current_confidence_threshold:
+                        violations_found_this_message.add("foreign_language")
+                        logger.debug(f"Foreign Language: User {user_id}, lang '{lang_code}' (conf: {confidence:.2f}) not in {channel_lang_config} for channel {channel.id}.")
+
+        # --- 5. Keyword/Phrase Matching (Discrimination, NSFW Text) ---
+        if any(word in discrimination_words_set for word in cleaned_content_for_matching.split()) or \
+           any(fuzz.partial_ratio(phrase, cleaned_content_for_matching) >= bot_config.fuzzy_match_threshold_keywords for phrase in discrimination_phrases):
+            violations_found_this_message.add("discrimination")
+
+        if "discrimination" not in violations_found_this_message and \
+           (any(word in nsfw_text_words_set for word in cleaned_content_for_matching.split()) or \
+           any(fuzz.partial_ratio(phrase, cleaned_content_for_matching) >= bot_config.fuzzy_match_threshold_keywords for phrase in nsfw_text_phrases)):
+            violations_found_this_message.add("nsfw_text")
         
+        # --- 6. AI Moderation (OpenAI for text, Sightengine for media) ---
         proactive_flag_reason = None
-        if not violations:
-            ai_text_violations, proactive_flag_reason = await self.check_ai_text_moderation(content_raw, member.id)
-            violations.update(ai_text_violations)
-        
-        violations.update(await self.check_ai_media_moderation(message.attachments))
+        if cleaned_content_for_matching and not violations_found_this_message:
+            if OPENAI_API_KEY:
+                now_ts = datetime.now(timezone.utc).timestamp()
+                user_cooldown = self.openai_cooldowns.get(user_id, 0)
+                
+                if now_ts > user_cooldown:
+                    self.openai_cooldowns[user_id] = now_ts + 10 
+                    try:
+                        openai_result = await check_openai_moderation_api(content_raw)
+                        if openai_result.get("flagged"):
+                            categories = openai_result.get("categories", {}) 
+                        if categories.get("harassment", False) or categories.get("harassment/threatening", False) or \
+                           categories.get("hate", False) or categories.get("hate/threatening", False) or \
+                           categories.get("self-harm", False) or categories.get("self-harm/intent", False) or categories.get("self-harm/instructions", False):
+                            violations_found_this_message.add("openai_flagged_severe")
+                        elif categories.get("sexual", False) or categories.get("sexual/minors", False):
+                             violations_found_this_message.add("openai_flagged_severe") 
+                        elif categories.get("violence", False) or categories.get("violence/graphic", False):
+                             violations_found_this_message.add("openai_flagged_severe")
+                        else: 
+                            category_scores = openai_result.get("category_scores", {})
+                            highest_score = max(category_scores.values()) if category_scores else 0
+                            if highest_score >= bot_config.proactive_flagging_openai_threshold:
+                                proactive_flag_reason = f"Proactive OpenAI Flag (Score: {highest_score:.2f})"
+                except Exception as e: 
+                    logger.error(f"OpenAI moderation call failed after retries for user {user_id}: {e}")
+              else:
+                    logger.debug(f"OpenAI check for user {user_id} skipped due to active cooldown.")
 
-        # --- Action Phase ---
-        if violations:
-            logger.info(f"User {member.id} triggered violations: {list(violations)}. Message: {message.jump_url}")
+        for attachment in message.attachments:
+            if attachment.content_type and (attachment.content_type.startswith("image/") or attachment.content_type.startswith("video/")):
+                if SIGHTENGINE_API_USER and SIGHTENGINE_API_SECRET:
+                    try:
+                        sightengine_result = await check_sightengine_media_api(attachment.url)
+                        if sightengine_result:
+                            nudity_data = sightengine_result.get("nudity", {})
+                            if nudity_data.get("sexual_activity", 0.0) >= bot_config.sightengine_nudity_sexual_activity_threshold or \
+                               nudity_data.get("suggestive", 0.0) >= bot_config.sightengine_nudity_suggestive_threshold: 
+                                violations_found_this_message.add("nsfw_media")
+                            if sightengine_result.get("gore", {}).get("prob", 0.0) >= bot_config.sightengine_gore_threshold:
+                                violations_found_this_message.add("gore_violence_media")
+                            offensive_data = sightengine_result.get("offensive", {})
+                            if offensive_data.get("prob", 0.0) >= bot_config.sightengine_offensive_symbols_threshold: 
+                                violations_found_this_message.add("offensive_symbols_media")
+                            
+                            if violations_found_this_message.intersection({"nsfw_media", "gore_violence_media", "offensive_symbols_media"}):
+                                logger.debug(f"Sightengine Flagged: User {user_id}, Attachment {attachment.filename}. Result: {sightengine_result}")
+                                break 
+                    except Exception as e:
+                        logger.error(f"Sightengine moderation call failed after retries for user {user_id}, attachment {attachment.filename}: {e}")
+        
+        if violations_found_this_message:
+            logger.info(f"User {user_id} ({member.name}) in guild {guild_id} triggered violations: {list(violations_found_this_message)}. Message: {message.jump_url}")
 
             if bot_config.delete_violating_messages:
-                try:
+                try: 
                     await message.delete()
-                except (discord.Forbidden, discord.NotFound):
-                    pass
-                except Exception as e:
-                    logger.error(f"Error deleting message {message.id}: {e}", exc_info=True)
-
+                    logger.info(f"Deleted message {message.id} from user {user_id} due to violations.")
+                except discord.Forbidden:
+                    logger.error(f"Failed to delete message {message.id} (user {user_id}): Missing permissions.")
+                except discord.NotFound:
+                    logger.warning(f"Failed to delete message {message.id} (user {user_id}): Message already deleted.")
+                except Exception as e: 
+                    logger.error(f"Error deleting message {message.id} (user {user_id}): {e}", exc_info=True)
+            
             if bot_config.send_in_channel_warning:
-                viol_summary = ", ".join(v.replace('_', ' ').title() for v in sorted(list(violations)))
+                viol_summary = ", ".join(v.replace('_', ' ').title() for v in violations_found_this_message)
                 warn_text = f"{member.mention}, your message was moderated due to: **{viol_summary}**. Please review server rules."
                 try:
-                    warning_message = await channel.send(warn_text)
-                    await asyncio.sleep(bot_config.in_channel_warning_delete_delay)
-                    await warning_message.delete()
-                except (discord.Forbidden, discord.NotFound):
-                    pass
+                    await channel.send(warn_text, delete_after=bot_config.in_channel_warning_delete_delay)
+                except discord.Forbidden:
+                    logger.error(f"Failed to send in-channel warning to channel {channel.id}: Missing permissions.")
                 except Exception as e:
-                    logger.error(f"Error with in-channel warning: {e}", exc_info=True)
+                    logger.error(f"Error sending in-channel warning to {channel.id}: {e}", exc_info=True)
 
-            await process_infractions_and_punish(member, guild, list(violations), content_raw, message.jump_url)
+            await process_infractions_and_punish(member, guild, list(violations_found_this_message), content_raw, message.jump_url)
+        elif proactive_flag_reason and db_conn:
+            try:
+                async with db_conn.cursor() as cursor:
+                    await cursor.execute("SELECT id FROM review_queue WHERE message_id = ?", (message.id,))
+                    if await cursor.fetchone() is None:
+                        await cursor.execute(
+                            "INSERT INTO review_queue (guild_id, user_id, channel_id, message_id, message_content, reason, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (message.guild.id, message.author.id, message.channel.id, message.id, message.content, proactive_flag_reason, datetime.now(timezone.utc).isoformat())
+                        )
+                        await db_conn.commit()
+                        logger.info(f"Message {message.id} from user {message.author.id} added to review queue. Reason: {proactive_flag_reason}")
+                        review_channel_id = await get_guild_config(message.guild.id, "review_channel_id", bot_config.default_review_channel_id)
+                        review_channel = self.bot.get_channel(review_channel_id)
+                        if review_channel:
+                            await review_channel.send(f"A new message has been flagged for review. Use `/review` to see it. Reason: **{proactive_flag_reason}**")
 
-        elif proactive_flag_reason:
-            await self.add_to_review_queue(message, proactive_flag_reason)
+            except Exception as e:
+                logger.error(f"Failed to add message {message.id} to review queue: {e}", exc_info=True)
+        else:
+            await self.bot.process_commands(message)
+
 
     # --- Individual Check Functions ---
     def check_dynamic_rules(self, raw_content: str, cleaned_content: str) -> set[str]:
@@ -1840,4 +2009,3 @@ if __name__ == "__main__":
         logger.info("Shutdown requested via KeyboardInterrupt.")
     except Exception as e:
         logger.critical(f"💥 UNHANDLED EXCEPTION IN TOP LEVEL: {e}", exc_info=True)
-
