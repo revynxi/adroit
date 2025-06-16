@@ -1117,19 +1117,19 @@ class ModerationCog(commands.Cog, name="Moderation"):
         proactive_flag_reason = None
 
         # --- Moderation Pipeline ---
-        violations.update(self.check_dynamic_rules(content_raw, cleaned_content))
-        violations.update(self.check_spam(message.author.id, message.guild.id, cleaned_content))
-        violations.update(self.check_advertising(content_raw, message.guild.id))
-        violations.update(self.check_message_limits(message))
-        violations.update(await self.check_language(message.guild.id, message.channel.id, content_raw))
-        violations.update(self.check_keyword_violations(cleaned_content))
+        await violations.update(self.check_dynamic_rules(content_raw, cleaned_content))
+        await violations.update(self.check_spam(message.author.id, message.guild.id, cleaned_content))
+        await violations.update(self.check_advertising(content_raw, message.guild.id))
+        await violations.update(self.check_message_limits(message))
+        await violations.update(await self.check_language(message.guild.id, message.channel.id, content_raw))
+        await violations.update(self.check_keyword_violations(cleaned_content))
 
         if not violations:
             ai_violations, proactive_flag_reason = await self.check_ai_text_moderation(content_raw, message.author.id)
-            violations.update(ai_violations)
+            await violations.update(ai_violations)
 
         if message.attachments:
-            violations.update(await self.check_ai_media_moderation(message.attachments))
+            await violations.update(await self.check_ai_media_moderation(message.attachments))
 
         # --- Action Phase ---
         if violations:
