@@ -1197,9 +1197,13 @@ class ModerationCog(commands.Cog, name="Moderation"):
         if not OPENAI_API_KEY: return set(), None
         
         now_ts = datetime.now(timezone.utc).timestamp()
-        if now_ts < self.openai_cooldowns.get(user_id, 0):
+        
+        global_openai_cooldown_key = 0 
+        cooldown_duration = 1 
+        if now_ts < self.openai_cooldowns.get(global_openai_cooldown_key, 0):
             return set(), None
-        self.openai_cooldowns[user_id] = now_ts + 10 
+        
+        self.openai_cooldowns[global_openai_cooldown_key] = now_ts + cooldown_duration
 
         try:
             openai_result = await check_openai_moderation_api(raw_content)
