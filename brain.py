@@ -1661,13 +1661,11 @@ class VoiceModerationCog(commands.Cog, name="Voice Moderation"):
                 if buffer.has_data() and (now - buffer.last_update) >= bot_config.voice_silence_threshold:
                     asyncio.create_task(self.process_audio_buffer(guild_id, user_id))
 
-    def audio_sink_callback(self, sink: discord.sinks.MP3Sink, *args):
-        """This function is called by the sink for each completed audio file."""
-        for user_id, audio in sink.audio_data.items():
-            user = self.bot.get_user(user_id)
-            if not user or user.bot:
-                continue
-            self.audio_buffers[sink.voice_client.guild.id][user_id].add_data(audio.file.read())
+    def audio_sink_callback(self, user, data):
+        """This function is called by the voice client for each audio packet."""
+        if not user or user.bot:
+            return
+        self.audio_buffers[user.guild.id][user.id].add_data(data)
 
 
     async def process_audio_buffer(self, guild_id: int, user_id: int):
