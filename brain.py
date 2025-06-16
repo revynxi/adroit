@@ -1102,62 +1102,86 @@ class ModerationCog(commands.Cog, name="Moderation"):
 
         logger.info("Periodic spam tracker cleanup completed.")
 
-    # --- Core Message Listener and Analysis Pipeline ---
+    # --- Core Message Listener ---
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not message.guild or message.author.bot or message.webhook_id:
             return
 
-        if isinstance(message.author, discord.Member) and message.author.guild_permissions.manage_messages:
-            return await self.bot.process_commands(message)
+        violations, proactive_flag_reason = await self._run_moderation_pipeline(message)
 
-        content_raw = message.content
-        cleaned_content = clean_message_content(content_raw)
-        violations = set()
-        proactive_flag_reason = None
-
-        # --- Moderation Pipeline ---
-        await violations.update(self.check_dynamic_rules(content_raw, cleaned_content))
-        await violations.update(self.check_spam(message.author.id, message.guild.id, cleaned_content))
-        await violations.update(self.check_advertising(content_raw, message.guild.id))
-        await violations.update(self.check_message_limits(message))
-        await violations.update(await self.check_language(message.guild.id, message.channel.id, content_raw))
-        await violations.update(self.check_keyword_violations(cleaned_content))
-
-        if not violations:
-            ai_violations, proactive_flag_reason = await self.check_ai_text_moderation(content_raw, message.author.id)
-            await violations.update(ai_violations)
-
-        if message.attachments:
-            await violations.update(await self.check_ai_media_moderation(message.attachments))
-
-        # --- Action Phase ---
         if violations:
             logger.info(f"User {message.author.id} ({message.author.name}) in guild {message.guild.id} triggered violations: {list(violations)}. Message: {message.jump_url}")
+          
+            await self._handle_violations(message, violations)
 
-            if bot_config.delete_violating_messages:
-                try:
-                    await message.delete()
-                    logger.info(f"Deleted message {message.id} from user {message.author.id} due to violations.")
-                except (discord.Forbidden, discord.NotFound) as e:
-                    logger.warning(f"Failed to delete message {message.id} (user {message.author.id}): {type(e).__name__}")
-                except Exception as e:
-                    logger.error(f"Error deleting message {message.id}: {e}", exc_info=True)
-
-            if bot_config.send_in_channel_warning:
-                viol_summary = ", ".join(v.replace('_', ' ').title() for v in violations)
-                warn_text = f"{message.author.mention}, your message was moderated due to: **{viol_summary}**. Please review server rules."
-                try:
-                    await message.channel.send(warn_text, delete_after=bot_config.in_channel_warning_delete_delay)
-                except discord.Forbidden as e:
-                    logger.error(f"Failed to send in-channel warning to channel {message.channel.id}: {e}")
-
-            await process_infractions_and_punish(message.author, message.guild, list(violations), content_raw, message.jump_url)
         elif proactive_flag_reason:
             await self.add_to_review_queue(message, proactive_flag_reason)
-            await self.bot.process_commands(message) 
-        else:
-            await self.bot.process_commands(message)
+
+        await self.bot.process_commands(message)
+
+    async def _run_moderation_pipeline(self, message: discord.Message) -> tuple[set[str], str | None]:
+        """Runs all moderation checks and returns violations and any proactive flag reason."""
+        violations = set()
+        proactive_flag_reason = None
+        content_raw = message.content
+        cleaned_content = clean_message_content(content_raw) 
+
+        # --- Run synchronous checks first ---
+        violations.update(self.check_dynamic_rules(content_raw, cleaned_content))
+        violations.update(self.check_spam(message.author.id, message.guild.id, cleaned_content))
+        violations.update(self.check_message_limits(message))
+        violations.update(self.check_keyword_violations(cleaned_content))
+
+        # --- Run asynchronous (I/O-bound) checks concurrently for speed ---
+        if not violations:
+            async_checks = [
+                self.check_advertising(content_raw, message.guild.id),
+                self.check_language(message.guild.id, message.channel.id, content_raw),
+            ]
+
+            if not OPENAI_API_KEY or (datetime.now(timezone.utc).timestamp() < self.openai_cooldowns.get(message.author.id, 0)):
+                ai_text_task = None
+            else:
+                ai_text_task = asyncio.create_task(self.check_ai_text_moderation(content_raw, message.author.id))
+                async_checks.append(ai_text_task)
+
+            if message.attachments:
+                async_checks.append(self.check_ai_media_moderation(message.attachments))
+
+            results = await asyncio.gather(*async_checks, return_exceptions=True)
+
+            for res in results:
+                if isinstance(res, Exception):
+                    logger.error(f"A moderation check failed: {res}", exc_info=True)
+                elif isinstance(res, set):
+                    violations.update(res)
+                elif isinstance(res, tuple):
+                    ai_violations, proactive_reason = res
+                    violations.update(ai_violations)
+                    if proactive_reason and not proactive_flag_reason:
+                        proactive_flag_reason = proactive_reason
+
+        return violations, proactive_flag_reason
+
+    async def _handle_violations(self, message: discord.Message, violations: set[str]):
+        """Handles the actions to be taken when violations are found."""
+        if bot_config.delete_violating_messages:
+            try:
+                await message.delete()
+                logger.info(f"Deleted message {message.id} from user {message.author.id} due to violations.")
+            except (discord.Forbidden, discord.NotFound) as e:
+                logger.warning(f"Failed to delete message {message.id} (user {message.author.id}): {type(e).__name__}")
+
+        if bot_config.send_in_channel_warning:
+            viol_summary = ", ".join(v.replace('_', ' ').title() for v in violations)
+            warn_text = f"{message.author.mention}, your message was moderated due to: **{viol_summary}**. Please review server rules."
+            try:
+                await message.channel.send(warn_text, delete_after=bot_config.in_channel_warning_delete_delay)
+            except discord.Forbidden as e:
+                logger.error(f"Failed to send in-channel warning to channel {message.channel.id}: {e}")
+        
+        await process_infractions_and_punish(message.author, message.guild, list(violations), message.content, message.jump_url)
 
     # --- Individual Check Functions ---
     def check_dynamic_rules(self, raw_content: str, cleaned_content: str) -> set[str]:
