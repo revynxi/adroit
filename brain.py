@@ -1127,8 +1127,8 @@ class ModerationCog(commands.Cog, name="Moderation"):
                             highest_score = max(category_scores.values()) if category_scores else 0
                             if highest_score >= bot_config.proactive_flagging_openai_threshold:
                                 proactive_flag_reason = f"Proactive OpenAI Flag (Score: {highest_score:.2f})"
-                  except Exception as e: 
-                      logger.error(f"OpenAI moderation call failed after retries for user {user_id}: {e}")
+                    except Exception as e: 
+                        logger.error(f"OpenAI moderation call failed after retries for user {user_id}: {e}")
               else:
                     logger.debug(f"OpenAI check for user {user_id} skipped due to active cooldown.")
 
