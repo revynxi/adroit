@@ -1781,6 +1781,19 @@ async def on_ready():
     logger.info(f"{bot.user.name} is online and ready! 🚀")
     logger.info("-" * 40)
 
+async def health_check_handler(request):
+    db_status = "OK" if db_conn else "Error" 
+    lang_model_status = "OK" if LANGUAGE_MODEL else "Error"
+    http_session_status = "OK" if http_session and not http_session.closed else "Error"
+    
+    status_text = (f"{bot.user.name} is running!\n"
+                   f"Latency: {round(bot.latency * 1000)}ms\n"
+                   f"DB: {db_status}\n"
+                   f"LangModel: {lang_model_status}\n"
+                   f"HTTPSession: {http_session_status}\n"
+                   f"Discord API OK: {bot.is_ready()}")
+    return web.Response(text=status_text, content_type="text/plain")
+
 async def main_async_runner():
     app = web.Application()
     app.router.add_get("/", health_check_handler)
