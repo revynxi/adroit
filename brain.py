@@ -200,7 +200,7 @@ nsfw_text_words_set, nsfw_text_phrases = load_terms_from_file('nsfw_terms.txt')
 
 def clean_message_for_language_detection(text: str) -> str:
     """
-    (FIXED) Cleans message content specifically for language detection.
+    Cleans message content specifically for language detection.
     This is crucial for improving fasttext's accuracy by removing "noise".
     """
     text = re.sub(r'https?://\S+|www\.\S+', '', text)
@@ -268,11 +268,11 @@ async def set_guild_config(guild_id: int, key: str, value_to_set):
 
 async def detect_language_ai(text: str) -> tuple[str | None, float]:
     """
-    (IMPROVED) Detect the language of the given text using FastText.
+    Detect the language of the given text using FastText.
     Returns (lang_code | None, confidence_score).
     """
     clean_text = clean_message_for_language_detection(text)
-    if not clean_text:
+    if not clean_text or len(clean_text.split()) < bot_config.min_msg_len_for_lang_check:
         return None, 0.0
 
     if not LANGUAGE_MODEL:
@@ -367,7 +367,7 @@ def retry_if_api_error(exception):
 )
 async def check_openai_moderation_api(text_content: str) -> dict:
     """
-    (FIXED) Checks text against the OpenAI moderation API with robust, exponential backoff retries.
+    Checks text against the OpenAI moderation API with robust, exponential backoff retries.
     This decorator automatically handles the "429 Too Many Requests" error.
     """
     if not OPENAI_API_KEY:
@@ -1033,16 +1033,19 @@ class ModerationCog(commands.Cog, name="Moderation"):
         member, guild, channel = message.author, message.guild, message.channel
         
         violations_found = set()
+        
+        lang_violations = await self.check_language(guild.id, channel.id, content_raw)
+        violations_found.update(lang_violations)
+
 
         violations_found.update(self.check_dynamic_rules(content_raw, cleaned_content_for_matching))
         violations_found.update(self.check_spam(member.id, guild.id, cleaned_content_for_matching))
         violations_found.update(self.check_advertising(content_raw))
         violations_found.update(self.check_message_limits(message))
-        violations_found.update(await self.check_language(guild.id, channel.id, content_raw))
         violations_found.update(self.check_keyword_violations(cleaned_content_for_matching))
         
         openai_proactive_flag_reason = None
-        if not violations_found:
+        if not violations_found: 
             ai_text_violations, openai_proactive_flag_reason = await self.check_ai_text_moderation(content_raw, member.id)
             violations_found.update(ai_text_violations)
         
@@ -1061,9 +1064,16 @@ class ModerationCog(commands.Cog, name="Moderation"):
                 viol_summary = ", ".join(v.replace('_', ' ').title() for v in violations_found)
                 warn_text = f"{member.mention}, your message was moderated due to: **{viol_summary}**. Please review server rules."
                 try:
-                    await channel.send(warn_text, delete_after=bot_config.in_channel_warning_delete_delay)
+                    warning_message = await channel.send(warn_text)
+                    await asyncio.sleep(bot_config.in_channel_warning_delete_delay)
+                    await warning_message.delete()
                 except discord.Forbidden:
                     pass
+                except discord.NotFound: 
+                    pass
+                except Exception as e:
+                    logger.error(f"Error sending/deleting in-channel warning: {e}", exc_info=True)
+
 
             await process_infractions_and_punish(member, guild, list(violations_found), content_raw, message.jump_url)
 
@@ -1146,7 +1156,10 @@ class ModerationCog(commands.Cog, name="Moderation"):
 
         lang_code, confidence = await detect_language_ai(raw_content)
         
-        if lang_code and lang_code not in channel_lang_config:
+        if not lang_code or confidence == 0.0:
+            return set()
+
+        if lang_code not in channel_lang_config:
             is_short_msg = len(raw_content) < bot_config.short_msg_threshold_lang
             threshold = bot_config.min_confidence_short_msg_lang if is_short_msg else bot_config.min_confidence_for_lang_flagging
             
@@ -1159,13 +1172,25 @@ class ModerationCog(commands.Cog, name="Moderation"):
                 return {"foreign_language"}
         return set()
 
+
     def check_keyword_violations(self, cleaned_content: str) -> set[str]:
         """Checks for static lists of forbidden keywords/phrases."""
-        if any(fuzz.partial_ratio(phrase, cleaned_content) >= bot_config.fuzzy_match_threshold_keywords for phrase in discrimination_phrases):
-            return {"discrimination"}
-        if any(fuzz.partial_ratio(phrase, cleaned_content) >= bot_config.fuzzy_match_threshold_keywords for phrase in nsfw_text_phrases):
-            return {"nsfw_text"}
-        return set()
+        violations = set()
+        for phrase in discrimination_phrases:
+            if fuzz.partial_ratio(phrase, cleaned_content) >= bot_config.fuzzy_match_threshold_keywords:
+                violations.add("discrimination")
+                break
+        for phrase in nsfw_text_phrases:
+            if fuzz.partial_ratio(phrase, cleaned_content) >= bot_config.fuzzy_match_threshold_keywords:
+                violations.add("nsfw_text")
+                break
+        
+        if any(word in discrimination_words_set for word in cleaned_content.split()):
+            violations.add("discrimination")
+        if any(word in nsfw_text_words_set for word in cleaned_content.split()):
+            violations.add("nsfw_text")
+
+        return violations
 
     async def check_ai_text_moderation(self, raw_content: str, user_id: int) -> tuple[set[str], str | None]:
         """Uses OpenAI API to check for complex text violations."""
@@ -1178,23 +1203,34 @@ class ModerationCog(commands.Cog, name="Moderation"):
 
         try:
             openai_result = await check_openai_moderation_api(raw_content)
+            
             if openai_result.get("flagged"):
                 categories = openai_result.get("categories", {})
-                if any(categories.get(cat) for cat in ["harassment", "harassment/threatening", "hate", "hate/threatening", "self-harm", "self-harm/intent", "self-harm/instructions", "sexual", "sexual/minors", "violence", "violence/graphic"]):
+                
+                severe_categories = [
+                    "harassment", "harassment/threatening", "hate", "hate/threatening",
+                    "self-harm", "self-harm/intent", "self-harm/instructions",
+                    "sexual", "sexual/minors", "violence", "violence/graphic"
+                ]
+                if any(categories.get(cat) for cat in severe_categories):
+                    logger.info(f"OpenAI flagged severe content from user {user_id}: {categories}. Message: {raw_content[:100]}...")
                     return {"openai_flagged_severe"}, None
                 else: 
-                    category_scores = openai_result.get("category_scores", {})
-                    highest_score = max(category_scores.values()) if category_scores else 0
-                    if highest_score > 0: 
-                        return {"openai_flagged_moderate"}, None
+                    logger.info(f"OpenAI flagged moderate content from user {user_id}: {categories}. Message: {raw_content[:100]}...")
+                    return {"openai_flagged_moderate"}, None
 
             category_scores = openai_result.get("category_scores", {})
-            highest_score = max(category_scores.values()) if category_scores else 0
-            if highest_score >= bot_config.proactive_flagging_openai_threshold:
-                flagged_cats = {k for k, v in categories.items() if v}
-                reason = f"Proactive OpenAI Flag (Score: {highest_score:.2f}, Cats: {flagged_cats})"
-                return set(), reason
+            
+            highest_score = 0
+            if category_scores:
+                highest_score = max(category_scores.values())
 
+            if highest_score >= bot_config.proactive_flagging_openai_threshold:
+                flagged_cats = {k for k, v in openai_result.get("categories", {}).items() if v}
+                reason = f"Proactive OpenAI Flag (Score: {highest_score:.2f}, Categories: {', '.join(flagged_cats) or 'N/A'})"
+                logger.info(f"OpenAI proactive flagging for user {user_id}: {reason}. Message: {raw_content[:100]}...")
+                return set(), reason 
+            
         except Exception as e:
             logger.error(f"OpenAI moderation call failed after retries for user {user_id}: {e}")
         
@@ -1204,22 +1240,23 @@ class ModerationCog(commands.Cog, name="Moderation"):
         """Uses Sightengine API to check for media violations."""
         if not (SIGHTENGINE_API_USER and SIGHTENGINE_API_SECRET): return set()
 
+        violations = set() 
         for attachment in attachments:
-            if attachment.content_type and attachment.content_type.startswith("image/"):
+            if attachment.content_type and attachment.content_type.startswith(("image/", "video/")): 
                 try:
                     result = await check_sightengine_media_api(attachment.url)
                     if not result: continue
                     
                     if result.get("nudity", {}).get("sexual_activity", 0) >= bot_config.sightengine_nudity_sexual_activity_threshold or \
                        result.get("nudity", {}).get("suggestive", 0) >= bot_config.sightengine_nudity_suggestive_threshold:
-                        return {"nsfw_media"}
+                        violations.add("nsfw_media")
                     if result.get("gore", {}).get("prob", 0) >= bot_config.sightengine_gore_threshold:
-                        return {"gore_violence_media"}
+                        violations.add("gore_violence_media")
                     if result.get("offensive", {}).get("prob", 0) >= bot_config.sightengine_offensive_symbols_threshold:
-                        return {"offensive_symbols_media"}
+                        violations.add("offensive_symbols_media")
                 except Exception as e:
                     logger.error(f"Sightengine moderation call failed for attachment {attachment.filename}: {e}")
-        return set()
+        return violations
 
     async def add_to_review_queue(self, message: discord.Message, reason: str):
         """Adds a message to the human review queue in the database."""
@@ -1238,7 +1275,19 @@ class ModerationCog(commands.Cog, name="Moderation"):
                     review_channel_id = await get_guild_config(message.guild.id, "review_channel_id", bot_config.default_review_channel_id)
                     review_channel = self.bot.get_channel(review_channel_id)
                     if review_channel:
-                        await review_channel.send(f"A new message has been flagged for review. Use `/review` to see it. Reason: **{reason}**")
+                        try:
+                            embed = discord.Embed(
+                                title="New Message Flagged for Review",
+                                description=f"**Reason:** {reason}\n**Author:** {message.author.mention} (`{message.author.id}`)\n**Channel:** {message.channel.mention}\n[Jump to Message]({message.jump_url})",
+                                color=discord.Color.yellow(),
+                                timestamp=datetime.now(timezone.utc)
+                            )
+                            embed.set_footer(text=f"Message ID: {message.id}")
+                            await review_channel.send(embed=embed)
+                        except discord.Forbidden:
+                            logger.error(f"Missing permissions to send review notification to channel #{review_channel.name} ({review_channel.id}).")
+                        except Exception as e:
+                            logger.error(f"Error sending review notification embed: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Failed to add message {message.id} to review queue: {e}", exc_info=True)
 
@@ -1457,7 +1506,16 @@ class ModerationCog(commands.Cog, name="Moderation"):
             return
 
         review_id, user_id, channel_id, message_id, content, reason, timestamp = item
-        user = interaction.guild.get_member(user_id)
+        user = interaction.guild.get_member(user_id) 
+        if not user: 
+            try:
+                user = await bot.fetch_user(user_id) 
+            except discord.NotFound:
+                user = None 
+            except Exception as e:
+                logger.error(f"Error fetching user {user_id} for review command: {e}")
+                user = None
+
         channel = interaction.guild.get_channel(channel_id)
         message_url = f"https://discord.com/channels/{interaction.guild_id}/{channel_id}/{message_id}"
 
@@ -1515,11 +1573,10 @@ class ReviewActionView(discord.ui.View):
         self.member = member
         self.message_id = message_id
 
-    @discord.ui.button(label="Punish & Add Rule", style=discord.ButtonStyle.danger, emoji="🔨")
+    @discord.ui.button(label="Punish & Add Rule", style=discord.ButtonStyle.danger, emoji="�")
     async def punish_and_add_rule(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self.member:
-            await interaction.response.send_message("Cannot punish user, they may have left the server.", ephemeral=True)
-            return
+            await interaction.response.send_message("Cannot punish user, they may have left the server. You can still add the rule.", ephemeral=True)
         modal = AddRuleModal(review_id=self.review_id)
         await interaction.response.send_modal(modal)
 
@@ -1530,12 +1587,16 @@ class ReviewActionView(discord.ui.View):
             await db_conn.execute("DELETE FROM review_queue WHERE id = ?", (self.review_id,))
             await db_conn.commit()
             await interaction.response.edit_message(content=f"✅ Review item `{self.review_id}` marked as safe.", view=None)
+            await log_moderation_action("review_rejected_safe", interaction.user, f"Review item `{self.review_id}` marked as safe.", guild=interaction.guild, color=discord.Color.green())
         except Exception as e:
             await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
+            logger.error(f"Error rejecting review item: {e}", exc_info=True)
+
 
     @discord.ui.button(label="Ignore", style=discord.ButtonStyle.secondary, emoji="✖️")
     async def ignore_item(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="This review item was ignored.", view=None)
+        await log_moderation_action("review_ignored", interaction.user, f"Review item `{self.review_id}` ignored.", guild=interaction.guild, color=discord.Color.light_grey())
 
 
 # --- Bot Lifecycle Events & Web Server ---
@@ -1589,7 +1650,7 @@ async def health_check_handler(request):
 
 async def main_async_runner():
     """
-    (FIXED) Handles the asynchronous running of both the bot and the web server.
+    Handles the asynchronous running of both the bot and the web server.
     This resolves the "No open ports detected" error on hosting platforms like Render.
     """
     app = web.Application()
@@ -1630,4 +1691,3 @@ if __name__ == "__main__":
         logger.info("Shutdown requested via KeyboardInterrupt.")
     except Exception as e:
         logger.critical(f"💥 UNHANDLED EXCEPTION IN TOP LEVEL __main__: {e}", exc_info=True)
-
