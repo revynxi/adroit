@@ -8,6 +8,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, quote_plus
 import io
+import platform
 
 # --- Core Dependencies ---
 import aiosqlite
