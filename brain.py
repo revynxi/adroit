@@ -195,7 +195,7 @@ def load_terms_from_file(filepath: str) -> tuple[set[str], list[str]]:
     return words, phrases
 
 discrimination_words_set, discrimination_phrases = load_terms_from_file('discrimination_terms.txt')
-nsfw_text_words_set, nsfw_text_phrases = load_terms_from_file('nsfw_text_terms.txt')
+nsfw_text_words_set, nsfw_text_phrases = load_terms_from_file('nsfw_terms.txt')
 
 
 def clean_message_for_language_detection(text: str) -> str:
