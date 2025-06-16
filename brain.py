@@ -1129,7 +1129,7 @@ class ModerationCog(commands.Cog, name="Moderation"):
                                 proactive_flag_reason = f"Proactive OpenAI Flag (Score: {highest_score:.2f})"
                     except Exception as e: 
                         logger.error(f"OpenAI moderation call failed after retries for user {user_id}: {e}")
-              else:
+                else:
                     logger.debug(f"OpenAI check for user {user_id} skipped due to active cooldown.")
 
         for attachment in message.attachments:
