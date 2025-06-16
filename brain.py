@@ -1880,11 +1880,37 @@ if __name__ == "__main__":
     try:
         if not discord.opus.is_loaded():
             try:
-                discord.opus.load_opus('opus')
-                logger.info("Opus library loaded successfully.")
-            except (OSError, discord.OpusNotLoaded):
-                logger.warning("Could not load opus library. Voice functionality will not work.")
+                opus_lib_names = ['opus', 'libopus.so', 'libopus.dylib', 'opus.dll']
+                loaded_any = False
+                for lib_name in opus_lib_names:
+                    try:
+                        discord.opus.load_opus(lib_name)
+                        logger.info(f"Opus library loaded successfully using '{lib_name}'.")
+                        loaded_any = True
+                        break 
+                    except (OSError, ImportError): 
+                        pass
+
+                if not loaded_any:
+                    logger.warning("Could not load opus library. Voice functionality will not work.")
+                    logger.warning("Please ensure libopus is installed on your system.")
+                    if platform.system() == "Linux":
+                        logger.warning("On Linux, install `libopus-dev` or `opus-tools` (e.g., `sudo apt install libopus-dev`)")
+                    elif platform.system() == "Windows":
+                        logger.warning("On Windows, download opus.dll and place it in your bot's directory or system PATH.")
+                    elif platform.system() == "Darwin": 
+                        logger.warning("On macOS, install `opus` via Homebrew (`brew install opus`)")
+
+            except Exception as e: 
+                logger.warning(f"An unexpected error occurred while trying to load Opus: {e}", exc_info=True)
+                logger.warning("Voice functionality may not work.")
+
+        else:
+            logger.info("Opus library was already loaded (or found successfully before explicit check).")
+
+        logger.info("Starting bot asynchronously...")
         asyncio.run(main_async_runner())
+
     except KeyboardInterrupt:
         logger.info("Shutdown requested via KeyboardInterrupt.")
     except Exception as e:
