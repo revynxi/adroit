@@ -133,11 +133,11 @@ class BotConfig:
         self.common_safe_foreign_words = {"bonjour", "hola", "merci", "gracias", "oui", "si", "nyet", "da", "salut", "ciao", "hallo", "guten tag", "privet", "konnichiwa", "arigato", "sawasdee", "namaste"}
         self.fuzzy_match_threshold_keywords = 85
         self.openai_api_cooldown_seconds = 5
-        self.sightengine_nudity_sexual_activity_threshold = 0.55
-        self.sightengine_nudity_suggestive_threshold = 0.65
-        self.sightengine_gore_threshold = 0.65
-        self.sightengine_offensive_symbols_threshold = 0.55
-        self.proactive_flagging_openai_threshold = 0.50
+        self.sightengine_nudity_sexual_activity_threshold = 0.45
+        self.sightengine_nudity_suggestive_threshold = 0.5
+        self.sightengine_gore_threshold = 0.5
+        self.sightengine_offensive_symbols_threshold = 0.45
+        self.proactive_flagging_openai_threshold = 0.45
         self.delete_violating_messages = True
         self.send_in_channel_warning = True
         self.in_channel_warning_delete_delay = 30
