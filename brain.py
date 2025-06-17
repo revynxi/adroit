@@ -21,6 +21,29 @@ from tenacity import (retry, retry_if_exception_type, stop_after_attempt,
                     wait_random_exponential)
 from thefuzz import fuzz
 
+
+print(f"--- DISCORD.PY DEBUG INFO ---")
+print(f"Python Executable: {sys.executable}")
+print(f"sys.version: {sys.version}")
+print(f"sys.path:")
+for p in sys.path:
+    print(f"  - {p}")
+
+try:
+    print(f"discord.__version__: {discord.__version__}")
+    print(f"discord.__file__: {discord.__file__}")
+    if hasattr(discord, 'sinks'):
+        print(f"discord.sinks found: True")
+    else:
+        print(f"discord.sinks found: False (!!!! THIS IS THE PROBLEM !!!!)")
+except AttributeError as e:
+    print(f"Error accessing discord attributes: {e}")
+except Exception as e:
+    print(f"Unexpected error during discord debug: {e}")
+
+
+print(f"--- END DISCORD.PY DEBUG INFO ---")
+
 load_dotenv()
 
 log_formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s')
