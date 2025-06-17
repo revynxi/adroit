@@ -13,6 +13,7 @@ import aiosqlite
 import discord
 import discord.ui
 import fasttext
+import aiohttp
 from aiohttp import ClientSession, client_exceptions, web
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -1375,7 +1376,7 @@ async def setup_hook():
     logger.info("Running setup_hook: Initializing bot components...")
     global http_session, LANGUAGE_MODEL, db_conn
     if not http_session or http_session.closed:
-        http_session = ClientSession(connector=web.TCPConnector(ssl=False))
+        http_session = ClientSession(connector=aiohttp.TCPConnector(ssl=False))
         logger.info("Aiohttp ClientSession initialized.")
     if not LANGUAGE_MODEL:
         if os.path.exists(FASTTEXT_MODEL_PATH):
