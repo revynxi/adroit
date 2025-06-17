@@ -7,13 +7,12 @@ import re
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, quote_plus
-import io 
+import io
+import platform
 
 import aiosqlite
 import discord
-import discord.ui
 import fasttext
-import aiohttp
 from aiohttp import ClientSession, client_exceptions, web
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -64,7 +63,7 @@ if not (SIGHTENGINE_API_USER and SIGHTENGINE_API_SECRET):
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-intents.voice_states = False 
+intents.voice_states = True
 intents.presences = False
 
 bot = commands.Bot(command_prefix=">>", intents=intents, help_command=None)
@@ -83,7 +82,7 @@ class BotConfig:
     def __init__(self):
         self.default_log_channel_id = None
         self.default_review_channel_id = None
-        self.default_voice_log_channel_id = None 
+        self.default_voice_log_channel_id = None
 
         self.default_channel_configs = {}
         self.forbidden_text_pattern = re.compile(
@@ -123,7 +122,7 @@ class BotConfig:
                 "excessive_mentions": {"points": 1, "severity": "Low"}, "excessive_attachments": {"points": 1, "severity": "Low"},
                 "long_message": {"points": 1, "severity": "Low"}, "gore_violence_media": {"points": 5, "severity": "High"},
                 "offensive_symbols_media": {"points": 3, "severity": "Medium"}, "dynamic_rule_violation": {"points": 3, "severity": "Medium"},
-                "voice_violation": {"points": 2, "severity": "Low"}, # Failed experiment
+                "voice_violation": {"points": 2, "severity": "Low"},
             }
         }
         self.spam_window_seconds = 10
@@ -154,10 +153,10 @@ class BotConfig:
         self.send_in_channel_warning = True
         self.in_channel_warning_delete_delay = 30
 
-        self.voice_moderation_auto_mute = False 
-        self.voice_moderation_mute_duration_hours = 0.0
-        self.voice_min_duration_for_transcription = 0.0
-        self.voice_silence_threshold = 0.0 
+        self.voice_moderation_auto_mute = True
+        self.voice_moderation_mute_duration_hours = 0.5
+        self.voice_min_duration_for_transcription = 1.5
+        self.voice_silence_threshold = 2.0
 
 
 bot_config = BotConfig()
@@ -279,7 +278,7 @@ async def log_moderation_action(
     color: discord.Color = discord.Color.orange(),
     extra_fields: list[tuple[str, str]] | None = None,
     message_url: str | None = None,
-    is_voice_log: bool = False 
+    is_voice_log: bool = False
 ):
     current_guild = guild or (target_user.guild if isinstance(target_user, discord.Member) else None)
     if not current_guild:
@@ -288,7 +287,7 @@ async def log_moderation_action(
 
     log_channel_id = None
     embed_title = ""
-    if is_voice_log: 
+    if is_voice_log:
         log_channel_id = await get_guild_config(current_guild.id, "voice_log_channel_id", bot_config.default_voice_log_channel_id)
         embed_title = f"🎙️ Voice Moderation: {action_type.replace('_', ' ').title()}"
     else:
@@ -387,6 +386,44 @@ async def check_openai_moderation_api(text_content: str) -> dict:
     retry=retry_if_api_error,
     reraise=True
 )
+async def transcribe_audio_with_whisper(audio_data: bytes, user_id: int) -> str | None:
+    if not http_session or http_session.closed:
+        logger.error("HTTP session not available for Whisper transcription.")
+        return None
+
+    url = "https://api.openai.com/v1/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+
+    form_data = web.FormData()
+    form_data.add_field('file', audio_data, filename='audio.mp3', content_type='audio/mpeg')
+    form_data.add_field('model', 'whisper-1')
+
+    try:
+        async with http_session.post(url, headers=headers, data=form_data, timeout=45) as response:
+            response.raise_for_status()
+            json_response = await response.json()
+            transcribed_text = json_response.get("text")
+            if transcribed_text:
+                logger.info(f"Whisper transcribed audio for user {user_id}: '{transcribed_text}'")
+                return transcribed_text
+            return None
+    except client_exceptions.ClientResponseError as e:
+        logger.error(f"Whisper API error for user {user_id}: {e.status} - {e.message}. Retrying if applicable.")
+        raise
+    except asyncio.TimeoutError:
+        logger.error(f"Whisper API request timed out for user {user_id}.")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error with Whisper API for user {user_id}: {e}", exc_info=True)
+        return None
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_random_exponential(multiplier=1, min=2, max=20),
+    retry=retry_if_api_error,
+    reraise=True
+)
 async def check_sightengine_media_api(image_url: str) -> dict:
     if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
         return {}
@@ -424,7 +461,7 @@ async def apply_moderation_punishment(
     total_points: int,
     violation_summary: str,
     moderator: discord.User | None = None,
-    is_voice_punishment: bool = False, 
+    is_voice_punishment: bool = False,
     original_content: str | None = None
 ):
     action_type = action_config["action"]
@@ -529,7 +566,7 @@ async def process_infractions_and_punish(
     violation_types: list[str],
     content: str,
     message_url: str | None,
-    is_voice: bool = False 
+    is_voice: bool = False
 ):
     if not db_conn:
         logger.error("process_infractions_and_punish: Database connection not available.")
@@ -562,6 +599,20 @@ async def process_infractions_and_punish(
             await db_conn.commit()
             return
 
+        is_auto_mute_enabled = await get_guild_config(guild_id, "voice_moderation_auto_mute", bot_config.voice_moderation_auto_mute)
+        if is_voice and is_auto_mute_enabled:
+            mute_duration = await get_guild_config(guild_id, "voice_moderation_mute_duration_hours", bot_config.voice_moderation_mute_duration_hours)
+            mute_config = {
+                "action": "mute",
+                "duration_hours": mute_duration,
+                "reason_suffix": "Automated mute due to severe voice violation.",
+                "dm_message": f"You have been automatically muted for {mute_duration} hours due to a severe violation detected in voice chat."
+            }
+            summary_str = ", ".join(summary_parts)
+            await apply_moderation_punishment(member, mute_config, 0, summary_str, is_voice_punishment=True, original_content=content)
+            await db_conn.commit()
+            return
+
         ninety_days_ago = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
         await cursor.execute(
             "SELECT SUM(points) FROM infractions WHERE user_id = ? AND guild_id = ? AND timestamp >= ?",
@@ -579,7 +630,7 @@ async def process_infractions_and_punish(
 
         if applicable_punishment_config:
             summary_str = ", ".join(summary_parts)
-            await apply_moderation_punishment(member, applicable_punishment_config, total_active_points, summary_str, original_content=content, is_voice_punishment=is_voice)
+            await apply_moderation_punishment(member, applicable_punishment_config, total_active_points, summary_str, original_content=content)
             if applicable_punishment_config["action"] == "ban":
                 await cursor.execute("DELETE FROM infractions WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
                 logger.info(f"Cleared all infractions for user {user_id} due to permanent ban.")
@@ -930,31 +981,10 @@ class ModerationCog(commands.Cog, name="Moderation"):
         self.cleanup_old_infractions_task.start()
         self.cleanup_spam_trackers_task.start()
 
-        self.report_message_context_menu = app_commands.ContextMenu(
-            name="Report to adroit!", 
-            callback=self.report_message_from_context,
-        )
-
-        self.bot.tree.add_command(self.report_message_context_menu)
-
     def cog_unload(self):
         self.temp_ban_check_task.cancel()
         self.cleanup_old_infractions_task.cancel()
         self.cleanup_spam_trackers_task.cancel()
-        self.bot.tree.remove_command(self.report_message_context_menu)
-
-    async def report_message_from_context(self, interaction: discord.Interaction, message: discord.Message):
-        """Callback for the 'Report to adroit!' context menu command."""
-        if message.author.id == interaction.user.id:
-            await interaction.response.send_message("You cannot report your own message.", ephemeral=True)
-            return
-
-        if message.author.bot:
-            await interaction.response.send_message("You cannot report bot messages.", ephemeral=True)
-            return
-
-        modal = ReportMessageModal(message=message)
-        await interaction.response.send_modal(modal)
 
     async def get_effective_channel_language_config(self, guild_id: int, channel_id: int) -> list[str] | None:
         channel_setting = await get_guild_config(guild_id, f"channel_language_{channel_id}")
@@ -1243,7 +1273,7 @@ class ModerationCog(commands.Cog, name="Moderation"):
         
         nudity_sa_thresh = await get_guild_config(guild_id, "sightengine_nudity_sexual_activity_threshold", bot_config.sightengine_nudity_sexual_activity_threshold)
         nudity_s_thresh = await get_guild_config(guild_id, "sightengine_nudity_suggestive_threshold", bot_config.sightengine_nudity_suggestive_threshold)
-        gore_thresh = await get_guild_config(guild_id, "sightengine_gore_threshold", bot_config.gore_threshold)
+        gore_thresh = await get_guild_config(guild_id, "sightengine_gore_threshold", bot_config.sightengine_gore_threshold)
         offensive_thresh = await get_guild_config(guild_id, "sightengine_offensive_symbols_threshold", bot_config.sightengine_offensive_symbols_threshold)
 
         for attach in attachments:
@@ -1504,47 +1534,6 @@ class ModerationCog(commands.Cog, name="Moderation"):
         view = ReviewActionView(review_id=review_id, member=user, message_id=message_id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-class ReportMessageModal(discord.ui.Modal, title="Report Message to Moderators"):
-    def __init__(self, message: discord.Message):
-        super().__init__()
-        self.message = message 
-
-    reason_input = discord.ui.TextInput(
-        label="Reason for reporting this message",
-        style=discord.TextStyle.paragraph,
-        placeholder="e.g., 'Spam', 'Hate Speech', 'Offensive content'",
-        required=True,
-        max_length=500,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not db_conn or not self.message.guild: return 
-
-        report_reason = self.reason_input.value.strip()
-
-        try:
-            mod_cog = interaction.client.get_cog("Moderation") 
-            if mod_cog and hasattr(mod_cog, 'add_to_review_queue'):
-                await mod_cog.add_to_review_queue(self.message, f"User Report: {report_reason}")
-                logger.info(f"User {interaction.user.id} ({interaction.user.name}) reported message {self.message.id} for: {report_reason}")
-            else:
-                logger.error("ModerationCog or its add_to_review_queue method not found! Falling back to direct DB insert.")
-                async with db_conn.cursor() as cursor:
-                    await cursor.execute(
-                        "INSERT OR IGNORE INTO review_queue (guild_id, user_id, channel_id, message_id, message_content, reason, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (self.message.guild.id, self.message.author.id, self.message.channel.id, self.message.id, self.message.content, f"User Report by {interaction.user.name}: {report_reason}", datetime.now(timezone.utc).isoformat())
-                    )
-                    await db_conn.commit()
-
-            await interaction.response.send_message(
-                "✅ Your report has been submitted for review. Thank you!",
-                ephemeral=True
-            )
-
-        except Exception as e:
-            await interaction.response.send_message(f"An error occurred while submitting your report: {e}", ephemeral=True)
-            logger.error(f"Error submitting user report for message {self.message.id}: {e}", exc_info=True)
-
 
 class AddRuleModal(discord.ui.Modal, title="Add New Violation Rule"):
     def __init__(self, review_id: int):
@@ -1614,13 +1603,160 @@ class ReviewActionView(discord.ui.View):
     async def ignore_item(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="This review item was ignored.", view=None)
 
+
+class RecordingSink(discord.sinks.MP3Sink):
+    def __init__(self, processing_callback):
+        super().__init__()
+        self.processing_callback = processing_callback
+        self.user_audio_data = defaultdict(io.BytesIO)
+        self.user_timers = {}
+
+    def write(self, data, user):
+        if not user: return
+        
+        if user.id in self.user_timers and self.user_timers[user.id]:
+            self.user_timers[user.id].cancel()
+
+        self.user_audio_data[user.id].write(data)
+        
+        self.user_timers[user.id] = asyncio.get_event_loop().call_later(
+            bot_config.voice_silence_threshold,
+            self.finish_and_process,
+            user.id
+        )
+
+    def finish_and_process(self, user_id):
+        if user_id in self.user_audio_data:
+            audio_buffer = self.user_audio_data.pop(user_id)
+            audio_buffer.seek(0)
+            audio_data = audio_buffer.read()
+            
+            if len(audio_data) / 1024 > 25: 
+                asyncio.create_task(self.processing_callback(user_id, audio_data))
+        
+        if user_id in self.user_timers:
+            self.user_timers.pop(user_id)
+
+    def cleanup(self):
+        for timer in self.user_timers.values():
+            if timer:
+                timer.cancel()
+        self.user_timers.clear()
+        self.user_audio_data.clear()
+
+
+class VoiceModerationCog(commands.Cog, name="Voice Moderation"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.active_sinks: dict[int, RecordingSink] = {}
+
+    async def process_audio_buffer(self, user_id: int, audio_data: bytes):
+        guild = None
+        for vc in self.bot.voice_clients:
+            if vc.guild and vc.channel.guild:
+                member = vc.guild.get_member(user_id)
+                if member:
+                    guild = vc.guild
+                    break
+
+        if not guild:
+            logger.warning(f"Could not find guild for user {user_id} during voice processing.")
+            return
+
+        logger.info(f"Processing audio segment for user {user_id} in guild {guild.id}")
+        transcribed_text = await transcribe_audio_with_whisper(audio_data, user_id)
+        if not transcribed_text:
+            return
+
+        mod_cog = self.bot.get_cog("Moderation")
+        if not mod_cog:
+            logger.error("Could not find ModerationCog to process voice transcript.")
+            return
+
+        violations = set()
+        cleaned_text = clean_message_content(transcribed_text)
+
+        violations.update(mod_cog.check_dynamic_rules(transcribed_text, cleaned_text))
+        violations.update(mod_cog.check_keyword_violations(cleaned_text))
+
+        ai_violations, _ = await mod_cog.check_ai_text_moderation(transcribed_text, user_id, guild.id)
+        if ai_violations:
+            violations.add("voice_violation") 
+
+        if violations:
+            member = guild.get_member(user_id)
+            if member:
+                await process_infractions_and_punish(member, guild, list(violations), transcribed_text, None, is_voice=True)
+
+    @app_commands.command(name="monitor_voice", description="[Admin] Starts monitoring the voice channel you are in.")
+    @app_commands.default_permissions(manage_guild=True)
+    async def monitor_voice(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.voice or not interaction.user.voice.channel:
+            await interaction.response.send_message("You must be in a voice channel to use this command.", ephemeral=True)
+            return
+
+        channel = interaction.user.voice.channel
+        guild = interaction.guild
+        if not guild: return
+
+        if guild.voice_client and guild.voice_client.is_connected():
+            if guild.voice_client.channel == channel:
+                await interaction.response.send_message(f"I am already monitoring {channel.mention}.", ephemeral=True)
+                return
+            await guild.voice_client.move_to(channel)
+        else:
+            try:
+                await channel.connect()
+            except Exception as e:
+                logger.error(f"Failed to connect to voice channel {channel.id}: {e}", exc_info=True)
+                await interaction.response.send_message("Failed to connect to the voice channel.", ephemeral=True)
+                return
+        
+        if guild.id in self.active_sinks:
+             self.active_sinks[guild.id].cleanup()
+        
+        sink = RecordingSink(self.process_audio_buffer)
+        self.active_sinks[guild.id] = sink
+        guild.voice_client.start_recording(sink)
+        
+        await interaction.response.send_message(f"🎤 Now monitoring voice activity in {channel.mention}.", ephemeral=True)
+        await log_moderation_action("voice_monitor_start", interaction.user, f"Started monitoring {channel.mention}", guild=interaction.guild, color=discord.Color.blue(), is_voice_log=True)
+
+    @app_commands.command(name="stop_monitoring", description="[Admin] Stops monitoring voice chat in this server.")
+    @app_commands.default_permissions(manage_guild=True)
+    async def stop_monitoring(self, interaction: discord.Interaction):
+        if not interaction.guild or not interaction.guild.voice_client or not interaction.guild.voice_client.is_connected():
+            await interaction.response.send_message("I am not currently monitoring any voice channel.", ephemeral=True)
+            return
+
+        channel_name = interaction.guild.voice_client.channel.mention
+        interaction.guild.voice_client.stop_recording()
+        
+        if interaction.guild.id in self.active_sinks:
+            self.active_sinks[interaction.guild.id].cleanup()
+            del self.active_sinks[interaction.guild.id]
+
+        await interaction.guild.voice_client.disconnect(force=True)
+
+        await interaction.response.send_message("Stopped monitoring voice activity.", ephemeral=True)
+        await log_moderation_action("voice_monitor_stop", interaction.user, f"Stopped monitoring {channel_name}", guild=interaction.guild, color=discord.Color.blue(), is_voice_log=True)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        if member.id == self.bot.user.id and before.channel and not after.channel:
+            if member.guild.id in self.active_sinks:
+                self.active_sinks[member.guild.id].cleanup()
+                del self.active_sinks[member.guild.id]
+                logger.info(f"Cleaned up voice sink for guild {member.guild.id} after bot was disconnected.")
+
+
 @bot.event
 async def setup_hook():
     logger.info("Running setup_hook: Initializing all bot components...")
     global http_session, LANGUAGE_MODEL, db_conn
 
     if not http_session or http_session.closed:
-        http_session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
+        http_session = ClientSession(connector=web.TCPConnector(ssl=False))
         logger.info("Aiohttp ClientSession initialized.")
 
     if not LANGUAGE_MODEL:
@@ -1641,6 +1777,7 @@ async def setup_hook():
     await bot.add_cog(GeneralCog(bot))
     await bot.add_cog(ConfigurationCog(bot))
     await bot.add_cog(ModerationCog(bot))
+    await bot.add_cog(VoiceModerationCog(bot))
     logger.info("All Cogs loaded.")
 
     try:
@@ -1711,6 +1848,36 @@ async def main_async_runner():
 
 if __name__ == "__main__":
     try:
+        if not discord.opus.is_loaded():
+            try:
+                opus_lib_names = ['opus', 'libopus-0.x64.dll', 'libopus-0.x86.dll', 'libopus.so.0', 'libopus.0.dylib', 'opus.dll']
+                loaded_any = False
+                for lib_name in opus_lib_names:
+                    try:
+                        discord.opus.load_opus(lib_name)
+                        logger.info(f"Opus library loaded successfully using '{lib_name}'.")
+                        loaded_any = True
+                        break 
+                    except (OSError, ImportError): 
+                        pass
+
+                if not loaded_any:
+                    logger.warning("Could not load opus library. Voice functionality will not work.")
+                    logger.warning("Please ensure libopus is installed on your system.")
+                    if platform.system() == "Linux":
+                        logger.warning("On Linux, install `libopus-dev` or `opus-tools` (e.g., `sudo apt install libopus-dev`)")
+                    elif platform.system() == "Windows":
+                        logger.warning("On Windows, download opus.dll and place it in your bot's directory or system PATH.")
+                    elif platform.system() == "Darwin": 
+                        logger.warning("On macOS, install `opus` via Homebrew (`brew install opus`)")
+
+            except Exception as e: 
+                logger.warning(f"An unexpected error occurred while trying to load Opus: {e}", exc_info=True)
+                logger.warning("Voice functionality may not work.")
+
+        else:
+            logger.info("Opus library was already loaded (or found successfully before explicit check).")
+
         logger.info("Starting bot asynchronously...")
         asyncio.run(main_async_runner())
 
