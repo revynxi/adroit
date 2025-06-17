@@ -9,13 +9,16 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, quote_plus
 import io
 import platform
+import subprocess
 
 import aiosqlite
 import discord
+import discord.ui
 import fasttext
 from aiohttp import ClientSession, client_exceptions, web
 from discord import app_commands
 from discord.ext import commands, tasks
+from discord_ext_voice_recv import AudioSink, VoiceRecvClient
 from dotenv import load_dotenv
 from tenacity import (retry, retry_if_exception_type, stop_after_attempt,
                     wait_random_exponential)
@@ -66,7 +69,7 @@ intents.message_content = True
 intents.voice_states = True
 intents.presences = False
 
-bot = commands.Bot(command_prefix=">>", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix=">>", intents=intents, voice_client_class=VoiceRecvClient, help_command=None)
 
 db_conn: aiosqlite.Connection | None = None
 LANGUAGE_MODEL: fasttext.FastText._FastText | None = None
@@ -981,10 +984,31 @@ class ModerationCog(commands.Cog, name="Moderation"):
         self.cleanup_old_infractions_task.start()
         self.cleanup_spam_trackers_task.start()
 
+        self.report_message_context_menu = app_commands.ContextMenu(
+            name="Report to adroit!", 
+            callback=self.report_message_from_context,
+        )
+
+        self.bot.tree.add_command(self.report_message_context_menu)
+
     def cog_unload(self):
         self.temp_ban_check_task.cancel()
         self.cleanup_old_infractions_task.cancel()
         self.cleanup_spam_trackers_task.cancel()
+        self.bot.tree.remove_command(self.report_message_context_menu)
+
+    async def report_message_from_context(self, interaction: discord.Interaction, message: discord.Message):
+        """Callback for the 'Report to adroit!' context menu command."""
+        if message.author.id == interaction.user.id:
+            await interaction.response.send_message("You cannot report your own message.", ephemeral=True)
+            return
+
+        if message.author.bot:
+            await interaction.response.send_message("You cannot report bot messages.", ephemeral=True)
+            return
+
+        modal = ReportMessageModal(message=message)
+        await interaction.response.send_modal(modal)
 
     async def get_effective_channel_language_config(self, guild_id: int, channel_id: int) -> list[str] | None:
         channel_setting = await get_guild_config(guild_id, f"channel_language_{channel_id}")
@@ -1534,6 +1558,54 @@ class ModerationCog(commands.Cog, name="Moderation"):
         view = ReviewActionView(review_id=review_id, member=user, message_id=message_id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+class ReportMessageModal(discord.ui.Modal, title="Report Message to Moderators"):
+    def __init__(self, message: discord.Message):
+        super().__init__()
+        self.message = message 
+
+    reason_input = discord.ui.TextInput(
+        label="Reason for reporting this message",
+        style=discord.TextStyle.paragraph,
+        placeholder="e.g., 'Spam', 'Hate Speech', 'Offensive content'",
+        required=True,
+        max_length=500,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not db_conn or not self.message.guild: return 
+
+        report_reason = self.reason_input.value.strip()
+
+        try:
+            await self.add_to_review_queue_from_report(self.message, report_reason, interaction.user)
+
+            await interaction.response.send_message(
+                "✅ Your report has been submitted for review. Thank you!",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            await interaction.response.send_message(f"An error occurred while submitting your report: {e}", ephemeral=True)
+            logger.error(f"Error submitting user report for message {self.message.id}: {e}", exc_info=True)
+
+    async def add_to_review_queue_from_report(self, message: discord.Message, reason: str, reporter: discord.User):
+        """
+        Adapts your existing add_to_review_queue to handle user reports.
+        This assumes your `add_to_review_queue` uses `message.guild.id`, etc.
+        """
+        mod_cog = interaction.client.get_cog("Moderation") 
+        if mod_cog and hasattr(mod_cog, 'add_to_review_queue'):
+            await mod_cog.add_to_review_queue(message, f"User Report: {reason}")
+            logger.info(f"User {reporter.id} ({reporter.name}) reported message {message.id} for: {reason}")
+
+        else:
+            logger.error("ModerationCog or its add_to_review_queue method not found!")
+            async with db_conn.cursor() as cursor:
+                await cursor.execute(
+                    "INSERT OR IGNORE INTO review_queue (guild_id, user_id, channel_id, message_id, message_content, reason, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (message.guild.id, message.author.id, message.channel.id, message.id, message.content, f"User Report by {reporter.name}: {reason}", datetime.now(timezone.utc).isoformat())
+                )
+                await db_conn.commit()
 
 class AddRuleModal(discord.ui.Modal, title="Add New Violation Rule"):
     def __init__(self, review_id: int):
@@ -1604,58 +1676,106 @@ class ReviewActionView(discord.ui.View):
         await interaction.response.edit_message(content="This review item was ignored.", view=None)
 
 
-class RecordingSink(discord.sinks.MP3Sink):
-    def __init__(self, processing_callback):
-        super().__init__()
-        self.processing_callback = processing_callback
-        self.user_audio_data = defaultdict(io.BytesIO)
-        self.user_timers = {}
+class CustomMP3RecordingSink(AudioSink):
+    """
+    A custom sink to record audio and convert it to MP3 using FFmpeg,
+    then process it via a provided callback.
+    Requires FFmpeg to be installed and available in the system's PATH.
+    """
+    def __init__(self, filename_prefix: str, process_callback):
+        self.filename_prefix = filename_prefix
+        self.process_callback = process_callback 
+        self.audio_data_buffers = {} 
+        self.encoding = "mp3"
+        self.all_users_processed_event = asyncio.Event() 
 
-    def write(self, data, user):
-        if not user: return
-        
-        if user.id in self.user_timers and self.user_timers[user.id]:
-            self.user_timers[user.id].cancel()
-
-        self.user_audio_data[user.id].write(data)
-        
-        self.user_timers[user.id] = asyncio.get_event_loop().call_later(
-            bot_config.voice_silence_threshold,
-            self.finish_and_process,
-            user.id
-        )
-
-    def finish_and_process(self, user_id):
-        if user_id in self.user_audio_data:
-            audio_buffer = self.user_audio_data.pop(user_id)
-            audio_buffer.seek(0)
-            audio_data = audio_buffer.read()
-            
-            if len(audio_data) / 1024 > 25: # Check if data is substantial enough (e.g., >25KB)
-                asyncio.create_task(self.processing_callback(user_id, audio_data))
-        
-        if user_id in self.user_timers:
-            self.user_timers.pop(user_id)
+    def write(self, data: bytes, user_id: int):
+        """Called by voice_recv whenever new audio data for a user arrives."""
+        if user_id not in self.audio_data_buffers:
+            self.audio_data_buffers[user_id] = io.BytesIO()
+        self.audio_data_buffers[user_id].write(data)
 
     def cleanup(self):
-        for timer in self.user_timers.values():
-            if timer:
-                timer.cancel()
-        self.user_timers.clear()
-        self.user_audio_data.clear()
+        """
+        Called when recording stops. Formats and processes each user's audio.
+        This method itself is NOT async, so we launch async tasks here.
+        """
+        print(f"[{self.filename_prefix}] Starting cleanup and formatting for all users...")
 
+        processing_tasks = []
+        for user_id, raw_audio_buffer in self.audio_data_buffers.items():
+            raw_audio_buffer.seek(0) 
+
+            processing_tasks.append(
+                asyncio.create_task(
+                    self._process_single_user_audio(user_id, raw_audio_buffer.getvalue())
+                )
+            )
+
+        asyncio.create_task(self._wait_for_all_processing(processing_tasks))
+
+    async def _process_single_user_audio(self, user_id: int, raw_audio_bytes: bytes):
+        """Formats raw audio to MP3 and then calls the main processing callback."""
+        try:
+            raw_buffer_for_ffmpeg = io.BytesIO(raw_audio_bytes)
+            formatted_mp3_data = self._format_to_mp3(raw_buffer_for_ffmpeg)
+
+            await self.process_callback(user_id, formatted_mp3_data.getvalue())
+            
+        except Exception as e:
+            logger.error(f"Error processing audio for user {user_id}: {e}", exc_info=True)
+        finally:
+            pass
+
+
+    def _format_to_mp3(self, raw_audio_buffer: io.BytesIO) -> io.BytesIO:
+        """Internal helper to convert raw audio (from buffer) to MP3 using FFmpeg."""
+        args = [
+            "ffmpeg",
+            "-f", "s16le",     
+            "-ar", "48000",      
+            "-loglevel", "error", 
+            "-ac", "2",          
+            "-i", "-",           
+            "-f", "mp3",       
+            "pipe:1",           
+        ]
+
+        try:
+            process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            raise RuntimeError("FFmpeg was not found. Ensure FFmpeg is installed in your Render environment and in PATH.") from None
+        except subprocess.SubprocessError as exc:
+            raise RuntimeError(f"FFmpeg process failed: {exc.__class__.__name__}: {exc}") from exc
+
+        mp3_bytes, _ = process.communicate(input=raw_audio_buffer.getvalue())
+        return io.BytesIO(mp3_bytes)
+
+    async def _wait_for_all_processing(self, tasks: list[asyncio.Task]):
+        """Waits for all individual user audio processing tasks to complete."""
+        await asyncio.gather(*tasks, return_exceptions=True) 
+        logger.info(f"[{self.filename_prefix}] All individual user audio processing tasks completed.")
+        self.all_users_processed_event.set() 
 
 class VoiceModerationCog(commands.Cog, name="Voice Moderation"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.active_sinks: dict[int, RecordingSink] = {}
+        self.active_sinks: dict[int, CustomMP3RecordingSink] = {}
 
     async def process_audio_buffer(self, user_id: int, audio_data: bytes):
+        """
+        This method will receive the MP3-formatted audio data for a single user
+        and proceed with transcription and moderation checks.
+        """
         guild = None
         for vc in self.bot.voice_clients:
-            if vc.guild and vc.channel.guild:
+            if vc.guild:
                 member = vc.guild.get_member(user_id)
-                if member:
+                if member and member.voice and member.voice.channel == vc.channel:
                     guild = vc.guild
                     break
 
@@ -1664,6 +1784,7 @@ class VoiceModerationCog(commands.Cog, name="Voice Moderation"):
             return
 
         logger.info(f"Processing audio segment for user {user_id} in guild {guild.id}")
+
         transcribed_text = await transcribe_audio_with_whisper(audio_data, user_id)
         if not transcribed_text:
             return
@@ -1681,7 +1802,7 @@ class VoiceModerationCog(commands.Cog, name="Voice Moderation"):
 
         ai_violations, _ = await mod_cog.check_ai_text_moderation(transcribed_text, user_id, guild.id)
         if ai_violations:
-            violations.add("voice_violation") 
+            violations.add("voice_violation")
 
         if violations:
             member = guild.get_member(user_id)
@@ -1706,18 +1827,25 @@ class VoiceModerationCog(commands.Cog, name="Voice Moderation"):
             await guild.voice_client.move_to(channel)
         else:
             try:
-                await channel.connect()
+                vc = await channel.connect(cls=VoiceRecvClient) 
             except Exception as e:
                 logger.error(f"Failed to connect to voice channel {channel.id}: {e}", exc_info=True)
                 await interaction.response.send_message("Failed to connect to the voice channel.", ephemeral=True)
                 return
-        
+
         if guild.id in self.active_sinks:
-             self.active_sinks[guild.id].cleanup()
+            if guild.voice_client.is_recording():
+                guild.voice_client.stop_recording()
+            self.active_sinks[guild.id].cleanup()
+            await self.active_sinks[guild.id].all_users_processed_event.wait()
+            del self.active_sinks[guild.id]
+
+
+        sink = CustomMP3RecordingSink(filename_prefix=f"guild_{guild.id}", 
+                                      process_callback=self.process_audio_buffer)
         
-        sink = RecordingSink(self.process_audio_buffer)
         self.active_sinks[guild.id] = sink
-        guild.voice_client.start_recording(sink)
+        guild.voice_client.start_recording(sink) 
         
         await interaction.response.send_message(f"🎤 Now monitoring voice activity in {channel.mention}.", ephemeral=True)
         await log_moderation_action("voice_monitor_start", interaction.user, f"Started monitoring {channel.mention}", guild=interaction.guild, color=discord.Color.blue(), is_voice_log=True)
@@ -1730,10 +1858,14 @@ class VoiceModerationCog(commands.Cog, name="Voice Moderation"):
             return
 
         channel_name = interaction.guild.voice_client.channel.mention
-        interaction.guild.voice_client.stop_recording()
-        
+
+        if interaction.guild.voice_client.is_recording():
+            interaction.guild.voice_client.stop_recording()
+
         if interaction.guild.id in self.active_sinks:
-            self.active_sinks[interaction.guild.id].cleanup()
+            sink_to_clean = self.active_sinks[interaction.guild.id]
+            sink_to_clean.cleanup() 
+            await sink_to_clean.all_users_processed_event.wait() 
             del self.active_sinks[interaction.guild.id]
 
         await interaction.guild.voice_client.disconnect(force=True)
@@ -1744,10 +1876,17 @@ class VoiceModerationCog(commands.Cog, name="Voice Moderation"):
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
         if member.id == self.bot.user.id and before.channel and not after.channel:
-            if member.guild.id in self.active_sinks:
-                self.active_sinks[member.guild.id].cleanup()
-                del self.active_sinks[member.guild.id]
-                logger.info(f"Cleaned up voice sink for guild {member.guild.id} after bot was disconnected.")
+            guild_id = member.guild.id if member.guild else None
+            if guild_id and guild_id in self.active_sinks:
+                sink_to_clean = self.active_sinks[guild_id]
+                if member.guild.voice_client and member.guild.voice_client.is_recording():
+                    member.guild.voice_client.stop_recording()
+                
+                sink_to_clean.cleanup()
+
+                await sink_to_clean.all_users_processed_event.wait()
+                del self.active_sinks[guild_id]
+                logger.info(f"Cleaned up voice sink for guild {guild_id} after bot was disconnected.")
 
 
 @bot.event
@@ -1790,6 +1929,8 @@ async def setup_hook():
 
 @bot.event
 async def on_ready():
+    await bot.tree.sync()
+  
     logger.info("-" * 40)
     logger.info(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
     logger.info(f"Discord.py Version: {discord.__version__}")
