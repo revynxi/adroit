@@ -7,6 +7,7 @@ import re
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, quote_plus
+import time
 
 import aiosqlite
 import discord
@@ -69,6 +70,23 @@ bot = commands.Bot(command_prefix=">>", intents=intents, help_command=None)
 db_conn: aiosqlite.Connection | None = None
 LANGUAGE_MODEL: fasttext.FastText._FastText | None = None
 http_session: ClientSession | None = None
+
+class GlobalRateLimiter:
+    def __init__(self, max_calls: int, period_seconds: int):
+        self.max_calls = max_calls
+        self.period_seconds = period_seconds
+        self.call_timestamps = deque()
+
+    def allow_call(self) -> bool:
+        now = time.monotonic()
+        while self.call_timestamps and self.call_timestamps[0] <= now - self.period_seconds:
+            self.call_timestamps.popleft()
+        if len(self.call_timestamps) < self.max_calls:
+            self.call_timestamps.append(now)
+            return True
+        return False
+
+openai_rate_limiter = GlobalRateLimiter(max_calls=55, period_seconds=60)
 
 class BotConfig:
     def __init__(self):
@@ -595,8 +613,9 @@ class ConfigurationCog(commands.Cog, name="Configuration"):
         await interaction.response.send_message(f"Review messages set to {channel.mention}." if channel else "Review channel cleared.", ephemeral=True)
 
     async def _set_language_config(self, interaction: discord.Interaction, languages_str: str, config_key: str, entity_mention: str):
+        if not interaction.guild_id: return
         lang_list_raw = [lang.strip().lower() for lang in languages_str.split(',')]
-        valid_langs, is_any, is_default = [], "any" in lang_list_raw, "default" in lang_list_raw
+        is_any, is_default = "any" in lang_list_raw, "default" in lang_list_raw
         if is_any: await set_guild_config(interaction.guild_id, config_key, ["any"])
         elif is_default: await set_guild_config(interaction.guild_id, config_key, None)
         else:
@@ -608,20 +627,19 @@ class ConfigurationCog(commands.Cog, name="Configuration"):
         
         msg = f"Language check for {entity_mention} now allows **any** language." if is_any else \
               f"Language override for {entity_mention} removed. Now uses server default." if is_default else \
-              f"Languages for {entity_mention} set to: **{', '.join(valid_langs).upper()}**." if valid_langs else \
+              f"Languages for {entity_mention} set to: **{', '.join(valid_langs).upper()}**." if 'valid_langs' in locals() and valid_langs else \
               f"Language configuration for {entity_mention} cleared."
         await interaction.response.send_message(msg, ephemeral=True)
 
     @group.command(name="set_server_language", description="Sets default server language(s). Use 'any' to disable.")
     @app_commands.describe(languages="Comma-separated ISO codes (e.g., en,fr).")
     async def set_server_language(self, interaction: discord.Interaction, languages: str):
-        if not interaction.guild_id: return
+        if not interaction.guild: return
         await self._set_language_config(interaction, languages, "default_language", f"server **{interaction.guild.name}**")
 
     @group.command(name="set_channel_language", description="Overrides server language for a channel. Use 'any' or 'default'.")
     @app_commands.describe(channel="Channel to configure.", languages="Comma-separated ISO codes, 'any', or 'default' to clear.")
     async def set_channel_language(self, interaction: discord.Interaction, channel: discord.TextChannel, languages: str):
-        if not interaction.guild_id: return
         await self._set_language_config(interaction, languages, f"channel_language_{channel.id}", channel.mention)
 
 class ModerationCog(commands.Cog, name="Moderation"):
@@ -629,7 +647,6 @@ class ModerationCog(commands.Cog, name="Moderation"):
         self.bot = bot
         self.user_message_timestamps: defaultdict[int, defaultdict[int, deque]] = defaultdict(lambda: defaultdict(deque))
         self.user_message_history: defaultdict[int, defaultdict[int, deque]] = defaultdict(lambda: defaultdict(lambda: deque(maxlen=bot_config.spam_repetition_history_count)))
-        self.openai_cooldowns: defaultdict[int, float] = defaultdict(float)
         self.temp_ban_check_task.start()
         self.cleanup_old_infractions_task.start()
         self.cleanup_spam_trackers_task.start()
@@ -722,7 +739,7 @@ class ModerationCog(commands.Cog, name="Moderation"):
                 self.check_language(message.guild.id, message.channel.id, content_raw),
             ]
             if OPENAI_API_KEY:
-                tasks_to_run.append(self.check_ai_text_moderation(content_raw, message.author.id, message.guild.id))
+                tasks_to_run.append(self.check_ai_text_moderation(content_raw, message.guild.id))
             if message.attachments:
                 tasks_to_run.append(self.check_ai_media_moderation(message.attachments, message.guild.id))
             
@@ -818,9 +835,10 @@ class ModerationCog(commands.Cog, name="Moderation"):
             violations.add("nsfw_text")
         return violations
 
-    async def check_ai_text_moderation(self, content: str, user_id: int, guild_id: int) -> tuple[set[str], str | None]:
-        if datetime.now(timezone.utc).timestamp() < self.openai_cooldowns.get(user_id, 0): return set(), None
-        self.openai_cooldowns[user_id] = datetime.now(timezone.utc).timestamp() + bot_config.openai_api_cooldown_seconds
+    async def check_ai_text_moderation(self, content: str, guild_id: int) -> tuple[set[str], str | None]:
+        if not openai_rate_limiter.allow_call():
+            logger.warning("OpenAI moderation check skipped due to global rate limit.")
+            return set(), None
         try:
             result = await check_openai_moderation_api(content)
             if result.get("flagged"):
@@ -834,7 +852,8 @@ class ModerationCog(commands.Cog, name="Moderation"):
                 if scores and max(scores.values()) >= threshold:
                     category, score = max(scores.items(), key=lambda item: item[1])
                     return set(), f"Proactive OpenAI Flag ({category.replace('/', ' ')}: {score:.2f})"
-        except Exception as e: logger.error(f"OpenAI moderation failed for user {user_id}: {e}", exc_info=True)
+        except Exception as e: 
+            logger.error(f"OpenAI moderation check failed: {e}", exc_info=True)
         return set(), None
 
     async def check_ai_media_moderation(self, attachments: list[discord.Attachment], guild_id: int) -> set[str]:
@@ -1033,7 +1052,10 @@ class AddRuleModal(discord.ui.Modal, title="Add New Violation Rule"):
     pattern = discord.ui.TextInput(label="Pattern", style=discord.TextStyle.short, placeholder="Enter the word, phrase, or regex pattern.")
 
     async def on_submit(self, interaction: discord.Interaction):
-        if not db_conn or not interaction.guild_id or not interaction.user: return
+        if not db_conn or not interaction.guild_id or not interaction.user or not self.rule_type.values:
+            await interaction.response.send_message("An error occurred or rule type was not selected.", ephemeral=True)
+            return
+            
         rule_type_val, pattern_val = self.rule_type.values[0], self.pattern.value.strip()
         try:
             async with db_conn.cursor() as cursor:
@@ -1061,11 +1083,11 @@ class ReviewActionView(discord.ui.View):
         self.message_url = message_url
 
     async def _close_review_item(self, interaction: discord.Interaction, message: str, color: discord.Color, log_reason: str):
-        if not db_conn: return
+        if not db_conn or not interaction.guild or not interaction.user: return
         async with db_conn.cursor() as cursor:
             await cursor.execute("DELETE FROM review_queue WHERE id = ?", (self.review_id,))
         await db_conn.commit()
-        await interaction.response.edit_message(content=message, view=None)
+        await interaction.response.edit_message(content=message, view=None, embed=None)
         await log_moderation_action("review_item_closed", interaction.user, f"Review item `{self.review_id}` closed. Reason: {log_reason}", guild=interaction.guild, color=color, message_url=self.message_url)
 
     @discord.ui.button(label="Punish & Add Rule", style=discord.ButtonStyle.danger, emoji="⚖️")
@@ -1142,3 +1164,4 @@ if __name__ == "__main__":
             asyncio.run(http_session.close())
         if db_conn:
             asyncio.run(db_conn.close())
+          
