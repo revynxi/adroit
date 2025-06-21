@@ -873,31 +873,49 @@ class AddRuleModal(discord.ui.Modal, title="Add New Violation Rule"):
     pattern = discord.ui.TextInput(label="Pattern", style=discord.TextStyle.short, placeholder="Enter the word, phrase, or regex pattern.")
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Defer the interaction immediately to prevent "interaction failed" errors.
+        await interaction.response.defer(ephemeral=True, thinking=False)
+
         if not db_conn or not interaction.guild_id or not interaction.user or not self.rule_type.values:
-            return await interaction.response.send_message("An error occurred.", ephemeral=True, delete_after=10)
+            await interaction.followup.send("An error occurred.", ephemeral=True)
+            return
             
         rule_type_val, pattern_val = self.rule_type.values[0], self.pattern.value.strip()
         log_reason = ""
+        followup_message = ""
+        
         try:
             if rule_type_val == 'forbidden_regex': re.compile(pattern_val)
             await db_conn.execute("INSERT INTO dynamic_rules (guild_id, rule_type, pattern, added_by_id, timestamp) VALUES (?, ?, ?, ?, ?)", (interaction.guild_id, rule_type_val, pattern_val, interaction.user.id, datetime.now(timezone.utc).isoformat()))
             await db_conn.commit()
             await load_dynamic_rules_from_db()
             
-            await interaction.response.send_message(f"✅ Rule added and review item `{self.parent_view.review_id}` closed.", ephemeral=True, delete_after=5)
+            followup_message = f"✅ Rule added and review item `{self.parent_view.review_id}` closed."
             log_reason = f"Added new rule: `{pattern_val}`"
             
         except re.error:
-            return await interaction.response.send_message("⚠️ Invalid Regex. Rule not added.", ephemeral=True, delete_after=10)
+            await interaction.followup.send("⚠️ Invalid Regex. Rule not added.", ephemeral=True)
+            return
         except aiosqlite.IntegrityError:
-            await interaction.response.send_message(f"⚠️ Rule already exists. Review item `{self.parent_view.review_id}` closed.", ephemeral=True, delete_after=5)
+            followup_message = f"⚠️ Rule already exists. Review item `{self.parent_view.review_id}` closed."
             log_reason = "Rule already existed."
         except Exception as e:
-            return await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True, delete_after=10)
+            logger.error(f"Error in AddRuleModal on_submit: {e}", exc_info=True)
+            await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
+            return
 
+        # Close the review item in the backend (logging, etc.)
         await self.parent_view._close_review_item_backend(interaction, discord.Color.blue(), log_reason)
+        
+        # Edit the original message from the /review command to show it's resolved
         if self.parent_view.message:
-            await self.parent_view.message.edit(content=f"✅ Review item `{self.parent_view.review_id}` has been resolved.", view=None, embed=None)
+            try:
+                await self.parent_view.message.edit(content=f"✅ Review item `{self.parent_view.review_id}` has been resolved.", view=None, embed=None)
+            except discord.NotFound:
+                logger.warning("Could not edit original review message, maybe it was dismissed.")
+        
+        # Finally, send the ephemeral confirmation to the user who submitted the modal
+        await interaction.followup.send(followup_message, ephemeral=True)
 
 
 class ReviewActionView(discord.ui.View):
