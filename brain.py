@@ -67,6 +67,7 @@ bot = commands.Bot(command_prefix=">>", intents=intents, help_command=None)
 
 db_conn: aiosqlite.Connection | None = None
 LANGUAGE_MODEL: fasttext.FastText._FastText | None = None
+http_session: ClientSession | None = None
 
 class GlobalRateLimiter:
     def __init__(self, max_calls: int, period_seconds: int):
@@ -944,9 +945,7 @@ async def on_ready():
     logger.info(f"{bot.user.name} is online and ready!")
 
 async def main():
-    async with bot, http_session if not (http_session and http_session.closed) else ClientSession() as session:
-        global http_session
-        http_session = session
+    async with bot:
         await bot.start(DISCORD_TOKEN)
 
 if __name__ == "__main__":
@@ -957,5 +956,9 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"💥 Unhandled exception at top level: {e}", exc_info=True)
     finally:
+        if http_session and not http_session.closed:
+            logger.info("Closing aiohttp session.")
+            asyncio.run(http_session.close())
         if db_conn:
+            logger.info("Closing database connection.")
             asyncio.run(db_conn.close())
