@@ -67,7 +67,6 @@ bot = commands.Bot(command_prefix=">>", intents=intents, help_command=None)
 
 db_conn: aiosqlite.Connection | None = None
 LANGUAGE_MODEL: fasttext.FastText._FastText | None = None
-http_session: ClientSession | None = None
 
 class GlobalRateLimiter:
     def __init__(self, max_calls: int, period_seconds: int):
