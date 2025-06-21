@@ -46,7 +46,7 @@ except Exception as e:
 
 DISCORD_TOKEN = os.getenv("ADROIT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-FASTTEXT_MODEL_PATH = os.getenv("FASTTEXT_MODEL_PATH", "lid.176.ftz")
+FASTTEXT_MODEL_PATH = os.getenv("FASTTEXT_MODEL_PATH", "lid.176.bin")
 SIGHTENGINE_API_USER = os.getenv("SIGHTENGINE_API_USER")
 SIGHTENGINE_API_SECRET = os.getenv("SIGHTENGINE_API_SECRET")
 
@@ -845,6 +845,7 @@ class ModerationCog(commands.Cog, name="Moderation"):
         
         view = ReviewActionView(review_id=review_id, member=user, content=content, reason=reason, message_url=message_url)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        view.message = await interaction.original_response()
 
 class ReportMessageModal(discord.ui.Modal, title="Report Message to Moderators"):
     def __init__(self, message: discord.Message):
@@ -861,7 +862,7 @@ class ReportMessageModal(discord.ui.Modal, title="Report Message to Moderators")
         await interaction.response.send_message("✅ Your report has been submitted. Thank you!", ephemeral=True)
 
 class AddRuleModal(discord.ui.Modal, title="Add New Violation Rule"):
-    def __init__(self, parent_view):
+    def __init__(self, parent_view: "ReviewActionView"):
         super().__init__()
         self.parent_view = parent_view
     rule_type = discord.ui.Select(placeholder="Select the rule type to add...", options=[
@@ -876,26 +877,39 @@ class AddRuleModal(discord.ui.Modal, title="Add New Violation Rule"):
             return await interaction.response.send_message("An error occurred.", ephemeral=True, delete_after=10)
             
         rule_type_val, pattern_val = self.rule_type.values[0], self.pattern.value.strip()
+        log_reason = ""
         try:
             if rule_type_val == 'forbidden_regex': re.compile(pattern_val)
             await db_conn.execute("INSERT INTO dynamic_rules (guild_id, rule_type, pattern, added_by_id, timestamp) VALUES (?, ?, ?, ?, ?)", (interaction.guild_id, rule_type_val, pattern_val, interaction.user.id, datetime.now(timezone.utc).isoformat()))
             await db_conn.commit()
             await load_dynamic_rules_from_db()
-            await self.parent_view.close_review_item(interaction, f"✅ Rule added and review item `{self.parent_view.review_id}` closed.", discord.Color.blue(), f"Added new rule: `{pattern_val}`")
-        except re.error: await interaction.response.send_message("⚠️ Invalid Regex. Rule not added.", ephemeral=True, delete_after=10)
-        except aiosqlite.IntegrityError: await self.parent_view.close_review_item(interaction, f"⚠️ Rule already exists. Review item `{self.parent_view.review_id}` closed.", discord.Color.orange(), "Rule already existed.")
-        except Exception as e: await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True, delete_after=10)
+            
+            await interaction.response.send_message(f"✅ Rule added and review item `{self.parent_view.review_id}` closed.", ephemeral=True, delete_after=5)
+            log_reason = f"Added new rule: `{pattern_val}`"
+            
+        except re.error:
+            return await interaction.response.send_message("⚠️ Invalid Regex. Rule not added.", ephemeral=True, delete_after=10)
+        except aiosqlite.IntegrityError:
+            await interaction.response.send_message(f"⚠️ Rule already exists. Review item `{self.parent_view.review_id}` closed.", ephemeral=True, delete_after=5)
+            log_reason = "Rule already existed."
+        except Exception as e:
+            return await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True, delete_after=10)
+
+        await self.parent_view._close_review_item_backend(interaction, discord.Color.blue(), log_reason)
+        if self.parent_view.message:
+            await self.parent_view.message.edit(content=f"✅ Review item `{self.parent_view.review_id}` has been resolved.", view=None, embed=None)
+
 
 class ReviewActionView(discord.ui.View):
     def __init__(self, review_id: int, member: discord.Member | discord.User | None, content: str, reason: str, message_url: str):
         super().__init__(timeout=600)
         self.review_id, self.member, self.content, self.reason, self.message_url = review_id, member, content, reason, message_url
+        self.message: discord.WebhookMessage | None = None
 
-    async def close_review_item(self, interaction: discord.Interaction, message: str, color: discord.Color, log_reason: str):
+    async def _close_review_item_backend(self, interaction: discord.Interaction, color: discord.Color, log_reason: str):
         if not db_conn or not interaction.guild: return
         await db_conn.execute("DELETE FROM review_queue WHERE id = ?", (self.review_id,))
         await db_conn.commit()
-        await interaction.response.edit_message(content=message, view=None, embed=None)
         log_embed = discord.Embed(title="Review Item Closed", description=f"**Item ID:** `{self.review_id}`\n**Moderator:** {interaction.user.mention}\n**Action:** {log_reason}", color=color)
         log_embed.add_field(name="Context", value=f"[Original Message]({self.message_url})")
         await log_moderation_action(interaction.guild, log_embed)
@@ -911,11 +925,13 @@ class ReviewActionView(discord.ui.View):
         if not isinstance(self.member, discord.Member):
             return await interaction.response.send_message("Cannot punish user, they may have left.", ephemeral=True, delete_after=10)
         await process_infractions_and_punish(self.member, self.member.guild, ["manual_review_punishment"], self.content, self.message_url)
-        await self.close_review_item(interaction, f"✅ User punished and review item `{self.review_id}` closed.", discord.Color.orange(), "Punished based on manual review.")
+        await self._close_review_item_backend(interaction, discord.Color.orange(), "Punished based on manual review.")
+        await interaction.response.edit_message(content=f"✅ User punished and review item `{self.review_id}` closed.", view=None, embed=None)
 
     @discord.ui.button(label="Mark as Safe", style=discord.ButtonStyle.success, emoji="✅")
     async def mark_safe(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.close_review_item(interaction, f"✅ Review item `{self.review_id}` marked as safe.", discord.Color.green(), "Moderator marked as safe.")
+        await self._close_review_item_backend(interaction, discord.Color.green(), "Moderator marked as safe.")
+        await interaction.response.edit_message(content=f"✅ Review item `{self.review_id}` marked as safe.", view=None, embed=None)
 
 @bot.event
 async def setup_hook():
